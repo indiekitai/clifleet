@@ -72,12 +72,16 @@ func TestPlanStageNoStageAndSkips(t *testing.T) {
 	if claude.Action != ActionStage || claude.Kind != KindRelease || claude.Release != "claude" {
 		t.Fatalf("claude native %+v", claude)
 	}
-	if !strings.Contains(claude.Fetch.Display, "github.com/anthropics/claude-code/releases/latest/download/claude-") {
+	if !strings.Contains(claude.Fetch.Display, "downloads.claude.ai/claude-code-releases/") || !strings.Contains(claude.Fetch.Display, "manifest.json") {
 		t.Fatalf("claude fetch %q", claude.Fetch.Display)
 	}
-	agent := PlanStage(Resolve("agent", nil), present("agent", "/home/a/.local/bin/agent", "/home/a/.local/bin/agent", "2026.10.22"), "")
-	if agent.Action != ActionNoStage {
+	agent := PlanStage(Resolve("agent", nil), present("agent", "/home/a/.local/bin/agent", "/home/a/.local/share/cursor-agent/versions/2026.10.22/cursor-agent", "2026.10.22"), "")
+	if agent.Action != ActionStage || agent.Release != "agent" || !strings.Contains(agent.Fetch.Display, "downloads.cursor.com/lab/") {
 		t.Fatalf("agent %+v", agent)
+	}
+	cagent := PlanStage(Resolve("cursor-agent", nil), present("cursor-agent", "/home/a/.local/bin/cursor-agent", "/home/a/.local/share/cursor-agent/versions/2026.10.22/cursor-agent", "2026.10.22"), "")
+	if cagent.Action != ActionStage || cagent.Release != "cursor_agent" {
+		t.Fatalf("cursor-agent %+v", cagent)
 	}
 
 	cursor := PlanStage(Resolve("cursor", nil), present("cursor", "/usr/local/bin/cursor", "/Applications/Cursor.app/Contents/Resources/app/bin/cursor", "3.0.0"), "")

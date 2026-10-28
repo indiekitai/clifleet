@@ -218,17 +218,18 @@ Fetch writes a cache on each host at `$XDG_CACHE_HOME/clifleet`, or `~/.cache/cl
 | npm global | `npm pack <pkg>@latest` into the cache | no-op when the staged version is already installed; otherwise `npm install -g --prefix <tmp>` and swap the package directory |
 | Homebrew formula or cask | `brew update`, then `brew fetch` into Homebrew's own cache | `brew upgrade` with auto-update off |
 | native Codex | `codex-package-<platform>.tar.gz` from `github.com/openai/codex` releases | atomic replace of the binary, or flip the standalone `current` link when the install is that layout |
-| native Claude Code | `claude-<platform>.tar.gz` from `github.com/anthropics/claude-code` releases | atomic replace of the resolved binary |
+| native Claude Code | version from `downloads.claude.ai/claude-code-releases/latest`, then `manifest.json` and `<version>/<platform>/claude`. The binary's SHA256 has to match the manifest | copy into `~/.local/share/claude/versions/<version>` and retarget `~/.local/bin/claude`. The previous version file stays |
+| native Cursor Agent (`agent`, `cursor-agent`) | version read from the official `https://cursor.com/install` script, then `downloads.cursor.com/lab/<version>/<os>/<arch>/agent-cli-package.tar.gz` | extract into `~/.local/share/cursor-agent/versions/<version>` and retarget the existing symlink |
 
-Those Codex and Claude URLs are the documented release assets (`releases/latest/download/<asset>`). clifleet does not scrape HTML to find them. An unsupported platform is `blocked`, not a guessed download.
+Codex's native package is the documented GitHub release asset. Claude's native package is the manifest on `downloads.claude.ai`, not an HTML page. Cursor Agent's version comes from the official installer script's `downloads.cursor.com/lab/<version>/...` URL. An unsupported platform is `blocked`, not a guessed download. `claude update` and `agent update` are not used for these installs unless you pass `--one-shot`.
 
-npm apply installs into a temporary prefix first. The live tree is moved aside only after that install has produced a package, and it is moved back if the new package does not run. The previous `codex` stays on `PATH` if the swap fails. Apply does not run `npm install` at all when the staged tarball's version already matches the package on disk, so an up-to-date `@openai/codex` is not renamed out from under `/opt/homebrew/lib/node_modules`.
+npm apply installs into a temporary prefix first (`--include=optional`, so a platform package such as `@openai/codex-linux-x64` is installed with the wrapper). For `@openai/codex`, fetch also packs `@openai/codex@<version>-<platform>` from whatever registry `npm` is already using. The live tree is moved aside only after that install has produced a package, and it is moved back if `codex --version` does not run. Leftover `@openai/.codex-*` directories from an interrupted npm rename are removed; the live `codex` directory is not. Apply does not run `npm install` at all when the staged tarball's version already matches the package on disk. That row is `up to date`.
 
-If the tarball's `engines.node` is not satisfied (OpenClaw's `>=24.22.1 <25 || >=26.12.1` on a Node 22 host, for example), fetch reports `blocked` with the required range and the host's Node version. Apply does not run the preinstall that would fail after the download.
+If the tarball's `engines.node` is not satisfied (OpenClaw's `>=24.22.1 <25 || >=26.12.1` on Node v22.23.4, for example), fetch reports `blocked (needs Node …)` with the host's Node version. Apply does not run. clifleet does not upgrade Node.
 
 Apply is the short command. For npm the package tarball is already on disk. npm may still fetch a dependency that is not in the npm cache while it fills the temp prefix. For Homebrew, apply still swaps the keg or cask. That swap is the unlink and relink, not the bottle download. If a formula's dependencies were not already cached, brew can download those during the swap. Run apply soon after fetch so the cached bottle still matches the formula.
 
-These native updaters stay `no-stage`. They do not publish a stable artifact URL clifleet can fetch: `agent update`, `cursor-agent update`, `opencode upgrade`, `copilot update`, `amp update`, `pi update`, `agy update`, `goose update`, `openclaw update`, `hermes update`, `kimi upgrade`, `qwen update`, `grok update`, `kilo upgrade`, `kiro-cli update`, and `aider --upgrade`. `clifleet upgrade` leaves them alone and says so. `clifleet upgrade --one-shot` runs the updater in place. That is the path that can make the binary disappear while it downloads.
+These native updaters stay `no-stage`. They do not publish a stable artifact URL clifleet can fetch: `opencode upgrade`, `copilot update`, `amp update`, `pi update`, `agy update`, `goose update`, `openclaw update`, `hermes update`, `kimi upgrade`, `qwen update`, `grok update`, `kilo upgrade`, `kiro-cli update`, and `aider --upgrade`. `clifleet upgrade` leaves them alone and says so. `clifleet upgrade --one-shot` runs the updater in place. That is the path that can make the binary disappear while it downloads.
 
 Bun, pnpm, and yarn global installs are `no-stage` as well. They do not have a pack command as direct as `npm pack`.
 
@@ -244,15 +245,15 @@ Three tiers. Only the first is searched on every host.
 | Opt-in | Built-in upgrade spec, not a default candidate | Name it in `tools` (global or that host's allowlist) |
 | Recipe | No built-in spec | A `[[recipe]]` plus a `tools` entry. The recipe does not add the name by itself |
 
-`cursor`, `agent`, and `cursor-agent` are three PATH names. `cursor` is the editor shell command (it can fail when Cursor.app is absent). `agent` is the Cursor Agent CLI from the official install script (`agent update`). `cursor-agent` is the same agent binary under the name Homebrew's `cursor-cli` cask links, which [aiupdate](https://github.com/narze/aiupdate) updates with `cursor-agent update`. A machine with both symlinks runs that updater once per name.
+`cursor`, `agent`, and `cursor-agent` are three PATH names. `cursor` is the editor shell command (it can fail when Cursor.app is absent). `agent` and `cursor-agent` are the Cursor Agent CLI. A native install under `~/.local/share/cursor-agent/versions/<version>` is staged from the official lab tarball and the symlink is retargeted. A Homebrew cask is still `brew upgrade`. `--one-shot` runs `agent update` or `cursor-agent update`. A machine with both symlinks retargets each one that is already installed.
 
 | Tool | Tier | Already installed as | Command |
 | --- | --- | --- | --- |
 | Claude Code, Codex, OpenCode | default | see the table above. Native Codex and Claude Code also stage from the GitHub release asset; `upgrade` fetches that and then swaps | see the table above |
 | `cursor` | default | Homebrew cask | `brew upgrade --cask cursor` |
 | `cursor` | default | editor shim on `PATH` | skipped, no native updater |
-| `agent` | default | install script | `agent update` |
-| `cursor-agent` | default | install script | `cursor-agent update` |
+| `agent` | default | install script | staged lab tarball, then retarget the symlink. `--one-shot` is `agent update` |
+| `cursor-agent` | default | install script | same staged tarball. `--one-shot` is `cursor-agent update` |
 | `cursor-agent` | default | Homebrew cask `cursor-cli` | `brew upgrade --cask cursor-cli` |
 | `gemini` | default | npm `@google/gemini-cli` | `npm install -g @google/gemini-cli@latest` |
 | `gemini` | default | Homebrew formula `gemini-cli` | `brew upgrade gemini-cli` |

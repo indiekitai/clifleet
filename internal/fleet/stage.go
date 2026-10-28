@@ -250,6 +250,11 @@ func renderStageRow(name string, p plan, phase string, dry bool, actions map[str
 		row.Detail = res.Blocked
 		return row
 	}
+	if res.Current {
+		row.Status = StCurrent
+		row.Detail = ""
+		return row
+	}
 	if res.Skip != "" {
 		row.Status = StSkipped
 		row.Detail = res.Skip

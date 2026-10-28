@@ -28,6 +28,7 @@ type ActionResult struct {
 	Exit    int
 	Skip    string
 	Blocked string
+	Current bool
 	Detail  string
 }
 
@@ -101,8 +102,15 @@ stage_npm() {
   eng=$(cf_tarball_engines "$tarball")
   [ -n "$ver" ] || ver=-
   [ -n "$eng" ] || eng=-
+  plat=-
+  if [ "$pkg" = "@openai/codex" ] && [ "$ver" != - ]; then
+    plat=$(cf_pack_codex_platform "$dest" "$ver") || {
+      cf_report fetch "$tool" 1 "could not pack the Codex platform package"
+      return 0
+    }
+  fi
   tmp="$root/staged/$tool.tmp"
-  printf 'npm\t%s\t%s\t%s\t%s\n' "$pkg" "$tarball" "$ver" "$eng" > "$tmp" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
+  printf 'npm\t%s\t%s\t%s\t%s\t%s\n' "$pkg" "$tarball" "$ver" "$eng" "$plat" > "$tmp" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
   mv -f "$tmp" "$root/staged/$tool" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
   est=$(cf_engines_status "$eng")
   case $est in
@@ -167,6 +175,7 @@ apply_npm() {
   kind=$(cf_stamp_field "$line" 1)
   pkg=$(cf_stamp_field "$line" 2)
   tarball=$(cf_stamp_field "$line" 3)
+  plat=$(cf_stamp_field "$line" 6)
   if [ "$kind" != npm ]; then
     cf_report apply "$tool" 1 "staged artifact is not an npm tarball"
     return 0
@@ -193,7 +202,7 @@ apply_npm() {
     cf_report apply "$tool" 1 "staged tarball missing"
     return 0
   fi
-  cf_apply_npm_safe "$tool" "$pkg" "$tarball"
+  cf_apply_npm_safe "$tool" "$pkg" "$tarball" "$plat"
 }
 
 apply_brew() {
@@ -247,6 +256,7 @@ func FetchScript(extraPaths []string, steps []StageStep) (string, error) {
 	b.WriteString(body)
 	b.WriteString(stagePrelude)
 	b.WriteString(fetchSafeShell)
+	b.WriteString(codexPackShell)
 	b.WriteString(fetchFns)
 	// Allow an explicit brew update. brew fetch below turns auto-update
 	// back off so a fetch cannot grow into an upgrade.
@@ -354,7 +364,7 @@ func validStageStep(step StageStep) error {
 			return fmt.Errorf("refusing unsafe brew target %q", step.BrewToken)
 		}
 	case catalog.KindRelease:
-		if step.Release != "codex" && step.Release != "claude" {
+		if step.Release != "codex" && step.Release != "claude" && step.Release != "agent" && step.Release != "cursor_agent" {
 			return fmt.Errorf("unknown release %q", step.Release)
 		}
 	default:
@@ -418,6 +428,11 @@ func parseActionLines(stdout, header, tag string) ([]ActionResult, error) {
 			res.Blocked = res.Detail
 			if res.Blocked == "" {
 				res.Blocked = "blocked"
+			}
+		case "current":
+			res.Current = true
+			if res.Detail == "" {
+				res.Detail = "up to date"
 			}
 		default:
 			code, err := strconv.Atoi(strings.TrimSpace(fields[3]))

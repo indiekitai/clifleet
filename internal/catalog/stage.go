@@ -92,13 +92,14 @@ func PlanStage(spec Spec, obs Observation, methodOverride string) StagePlan {
 	}
 }
 
-// nativeRelease reports the GitHub release id for a native install we know
-// how to stage. The asset names are the ones upstream documents, not a
-// scraped release page.
+// nativeRelease reports the staged-artifact id for a native install.
+// cursor-agent's id uses an underscore because it becomes a shell function name.
 func nativeRelease(name string) (string, bool) {
 	switch name {
-	case "codex", "claude":
+	case "codex", "claude", "agent":
 		return name, true
+	case "cursor-agent":
+		return "cursor_agent", true
 	default:
 		return "", false
 	}
@@ -112,9 +113,16 @@ func releaseStage(id string) StagePlan {
 		fetchDisplay = "curl -fsSL https://github.com/openai/codex/releases/latest/download/codex-package-<platform>.tar.gz"
 		applyDisplay = "swap staged Codex package into place"
 	case "claude":
-		// anthropics/claude-code release assets (claude-<os>-<arch>.tar.gz).
-		fetchDisplay = "curl -fsSL https://github.com/anthropics/claude-code/releases/latest/download/claude-<platform>.tar.gz"
-		applyDisplay = "swap staged Claude binary into place"
+		// downloads.claude.ai publishes manifest.json (sha256 per platform) and
+		// the binary at <version>/<platform>/claude. Apply drops it in
+		// ~/.local/share/claude/versions/<version> and retargets the symlink.
+		fetchDisplay = "curl -fsSL https://downloads.claude.ai/claude-code-releases/<version>/manifest.json && sha256"
+		applyDisplay = "retarget ~/.local/bin/claude at the staged version"
+	case "agent", "cursor_agent":
+		// Official installer publishes downloads.cursor.com/lab/<version>/<os>/<arch>/agent-cli-package.tar.gz
+		// and extracts it under ~/.local/share/cursor-agent/versions/<version>.
+		fetchDisplay = "curl -fsSL https://downloads.cursor.com/lab/<version>/<os>/<arch>/agent-cli-package.tar.gz"
+		applyDisplay = "retarget ~/.local/bin agent symlink at the staged version"
 	default:
 		return StagePlan{Method: MethodNative, Action: ActionNoStage, Reason: ReasonNoStageNative}
 	}

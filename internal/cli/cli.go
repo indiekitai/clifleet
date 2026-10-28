@@ -157,7 +157,8 @@ terminal is not opened against a binary that is mid-replace:
   npm                  npm pack @latest, install into a temp prefix, swap the package dir
   Homebrew             brew fetch, then brew upgrade (auto-update off)
   native Codex         GitHub release codex-package-<platform>.tar.gz, then swap
-  native Claude Code   GitHub release claude-<platform>.tar.gz, then swap
+  native Claude Code   downloads.claude.ai manifest + sha256, then retarget the version symlink
+  native Cursor Agent  downloads.cursor.com lab tarball, then retarget the version symlink
 
 --fetch and --apply run those two phases on their own. clifleet fetch and
 clifleet apply are the same steps. --fetch does not replace the live binary.

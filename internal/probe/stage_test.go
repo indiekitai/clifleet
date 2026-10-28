@@ -554,7 +554,7 @@ func TestNpmApplySkipsCurrentAndRestoresOnFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	if len(results) != 1 || results[0].Exit != 0 || !strings.Contains(results[0].Detail, "already 1.2.3") {
+	if len(results) != 1 || !results[0].Current || !strings.Contains(results[0].Detail, "up to date") {
 		t.Fatalf("current apply %+v\n%s", results, out)
 	}
 	assertNpmSilent(t, logPath)
@@ -744,7 +744,7 @@ cp "$CURL_BODY" "$out"
 	if err != nil {
 		t.Fatalf("second apply: %v\n%s", err, out)
 	}
-	if len(applied) != 1 || applied[0].Exit != 0 || !strings.Contains(applied[0].Detail, "already 1.2.3") {
+	if len(applied) != 1 || !applied[0].Current || !strings.Contains(applied[0].Detail, "up to date") {
 		t.Fatalf("second apply %+v\n%s", applied, out)
 	}
 	live, err = os.ReadFile(filepath.Join(bin, "codex"))
@@ -861,6 +861,284 @@ func TestReleaseFetchBlocksUnknownPlatform(t *testing.T) {
 		if len(bytesTrim(body)) != 0 {
 			t.Fatalf("curl ran for an unknown platform:\n%s", body)
 		}
+	}
+}
+
+func TestClaudeManifestSwapRetargetsSymlink(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil || exec.Command("sha256sum", "--version").Run() != nil && exec.Command("shasum", "-a", "256", "/dev/null").Run() != nil {
+		t.Skip("sh or sha256 tool not available")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	bin := filepath.Join(root, "bin")
+	versions := filepath.Join(home, ".local", "share", "claude", "versions")
+	localBin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(versions, 0o755); err != nil || os.MkdirAll(localBin, 0o755) != nil || os.MkdirAll(bin, 0o755) != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(versions, "2.1.0")
+	writeExe(t, old, "#!/bin/sh\nprintf '2.1.0 (Claude Code)\\n'\n")
+	if err := os.Symlink(old, filepath.Join(localBin, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	newBin := filepath.Join(root, "claude-new")
+	writeExe(t, newBin, "#!/bin/sh\nprintf '2.1.40 (Claude Code)\\n'\n")
+	sumOut, err := exec.Command("sha256sum", newBin).Output()
+	if err != nil {
+		sumOut, err = exec.Command("shasum", "-a", "256", newBin).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	sum := strings.Fields(string(sumOut))[0]
+	manifest := filepath.Join(root, "manifest.json")
+	body := "{\n  \"version\": \"2.1.40\",\n  \"platforms\": {\n"
+	for _, plat := range []string{"darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "linux-arm64-musl", "linux-x64-musl"} {
+		body += "    \"" + plat + "\": {\"binary\": \"claude\", \"checksum\": \"" + sum + "\"},\n"
+	}
+	body += "    \"unused\": {\"binary\": \"claude\", \"checksum\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n  }\n}\n"
+	if err := os.WriteFile(manifest, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(bin, "curl"), `#!/bin/sh
+out=
+url=
+prev=
+for a in "$@"; do
+  if [ "$prev" = -o ]; then out=$a; fi
+  case $a in http*) url=$a ;; esac
+  prev=$a
+done
+case $url in
+  */latest) printf '%s\n' "$CLAUDE_VER" > "$out" ;;
+  */manifest.json.sig) printf 'sig\n' > "$out" ;;
+  */manifest.json) cp "$CLAUDE_MANIFEST" "$out" ;;
+  */claude) cp "$CLAUDE_BIN" "$out" ;;
+  *) printf 'unexpected %s\n' "$url" >&2; exit 1 ;;
+esac
+`)
+	step := StageStep{Tool: "claude", Kind: catalog.KindRelease, Release: "claude"}
+	fetch, err := FetchScript([]string{bin, localBin}, []StageStep{step})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := []string{
+		"PATH=" + localBin + ":" + bin + ":/usr/bin:/bin",
+		"HOME=" + home,
+		"CLAUDE_VER=2.1.40",
+		"CLAUDE_MANIFEST=" + manifest,
+		"CLAUDE_BIN=" + newBin,
+	}
+	out := runSh(t, fetch, env)
+	results, err := ParseFetch(out)
+	if err != nil || len(results) != 1 || results[0].Exit != 0 || results[0].Blocked != "" {
+		t.Fatalf("fetch %v %+v\n%s", err, results, out)
+	}
+	apply, err := ApplyScript([]Tool{{Name: "claude", Binary: "claude"}}, []string{bin, localBin}, []StageStep{step})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = runSh(t, apply, env)
+	applied, obs, err := ParseApply(out)
+	if err != nil {
+		t.Fatalf("apply %v\n%s", err, out)
+	}
+	if len(applied) != 1 || applied[0].Exit != 0 {
+		t.Fatalf("apply %+v\n%s", applied, out)
+	}
+	if ShortVersion(obs["claude"].Version) != "2.1.40" {
+		t.Fatalf("reprobe %+v", obs["claude"])
+	}
+	link, err := os.Readlink(filepath.Join(localBin, "claude"))
+	if err != nil || !strings.HasSuffix(link, "/versions/2.1.40") {
+		t.Fatalf("symlink %s %v", link, err)
+	}
+	if _, err := os.Stat(old); err != nil {
+		t.Fatalf("old claude version removed: %v", err)
+	}
+	out = runSh(t, apply, env)
+	applied, _, err = ParseApply(out)
+	if err != nil || len(applied) != 1 || !applied[0].Current {
+		t.Fatalf("second apply %+v %v\n%s", applied, err, out)
+	}
+
+	// A manifest checksum that does not match the bytes must not retarget the symlink.
+	bad := filepath.Join(root, "bad-manifest.json")
+	if err := os.WriteFile(bad, []byte("{\n  \"platforms\": {\n    \"linux-x64\": {\"checksum\": \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"},\n    \"darwin-arm64\": {\"checksum\": \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}\n  }\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env[3] = "CLAUDE_MANIFEST=" + bad
+	env[2] = "CLAUDE_VER=2.1.41"
+	out = runSh(t, fetch, env)
+	results, err = ParseFetch(out)
+	if err != nil || len(results) != 1 || results[0].Exit == 0 || !strings.Contains(results[0].Detail, "checksum") {
+		t.Fatalf("bad checksum %+v %v\n%s", results, err, out)
+	}
+	link, _ = os.Readlink(filepath.Join(localBin, "claude"))
+	if !strings.HasSuffix(link, "/versions/2.1.40") {
+		t.Fatalf("checksum failure moved the symlink to %s", link)
+	}
+}
+
+func TestCursorAgentVersionDirSwap(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	bin := filepath.Join(root, "bin")
+	localBin := filepath.Join(home, ".local", "bin")
+	oldDir := filepath.Join(home, ".local", "share", "cursor-agent", "versions", "2026.01.01-aaaa")
+	if err := os.MkdirAll(filepath.Join(oldDir), 0o755); err != nil || os.MkdirAll(localBin, 0o755) != nil || os.MkdirAll(bin, 0o755) != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(oldDir, "cursor-agent"), "#!/bin/sh\nprintf '2026.01.01-aaaa\\n'\n")
+	if err := os.Symlink(filepath.Join(oldDir, "cursor-agent"), filepath.Join(localBin, "agent")); err != nil {
+		t.Fatal(err)
+	}
+	pkg := filepath.Join(root, "agent.tgz")
+	writeTarGz(t, pkg, map[string]string{
+		"payload/cursor-agent": "#!/bin/sh\nprintf '2026.10.28-abc123\\n'\n",
+	})
+	install := filepath.Join(root, "install.sh")
+	if err := os.WriteFile(install, []byte("DOWNLOAD_URL=\"https://downloads.cursor.com/lab/2026.10.28-abc123/${OS}/${ARCH}/agent-cli-package.tar.gz\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(bin, "curl"), `#!/bin/sh
+out=
+url=
+prev=
+for a in "$@"; do
+  if [ "$prev" = -o ]; then out=$a; fi
+  case $a in http*) url=$a ;; esac
+  prev=$a
+done
+case $url in
+  https://cursor.com/install) cp "$INSTALL_SH" "$out" ;;
+  https://downloads.cursor.com/lab/*/agent-cli-package.tar.gz) cp "$AGENT_TGZ" "$out" ;;
+  *) printf 'unexpected %s\n' "$url" >&2; exit 1 ;;
+esac
+`)
+	step := StageStep{Tool: "agent", Kind: catalog.KindRelease, Release: "agent"}
+	fetch, err := FetchScript([]string{bin, localBin}, []StageStep{step})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := []string{
+		"PATH=" + localBin + ":" + bin + ":/usr/bin:/bin",
+		"HOME=" + home,
+		"INSTALL_SH=" + install,
+		"AGENT_TGZ=" + pkg,
+	}
+	out := runSh(t, fetch, env)
+	results, err := ParseFetch(out)
+	if err != nil || len(results) != 1 || results[0].Exit != 0 {
+		t.Fatalf("fetch %v %+v\n%s", err, results, out)
+	}
+	apply, err := ApplyScript([]Tool{{Name: "agent", Binary: "agent"}}, []string{bin, localBin}, []StageStep{step})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = runSh(t, apply, env)
+	applied, obs, err := ParseApply(out)
+	if err != nil {
+		t.Fatalf("apply %v\n%s", err, out)
+	}
+	if len(applied) != 1 || applied[0].Exit != 0 {
+		t.Fatalf("apply %+v\n%s", applied, out)
+	}
+	if !strings.Contains(obs["agent"].Version, "2026.10.28-abc123") {
+		t.Fatalf("reprobe %+v", obs["agent"])
+	}
+	link, err := os.Readlink(filepath.Join(localBin, "agent"))
+	if err != nil || !strings.Contains(link, "/versions/2026.10.28-abc123/cursor-agent") {
+		t.Fatalf("symlink %s %v", link, err)
+	}
+	if _, err := os.Stat(filepath.Join(oldDir, "cursor-agent")); err != nil {
+		t.Fatalf("old cursor-agent version removed: %v", err)
+	}
+}
+
+func TestNpmSwapRemovesCodexJunkDirs(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	bin := filepath.Join(root, "bin")
+	prefix := filepath.Join(root, "prefix")
+	scope := filepath.Join(prefix, "lib", "node_modules", "@openai")
+	pkgDir := filepath.Join(scope, "codex")
+	junk := filepath.Join(scope, ".codex-partial")
+	if err := os.MkdirAll(filepath.Join(pkgDir, "bin"), 0o755); err != nil || os.MkdirAll(junk, 0o755) != nil || os.MkdirAll(bin, 0o755) != nil || os.MkdirAll(filepath.Join(prefix, "bin"), 0o755) != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(junk, "leftover"), []byte("junk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(pkgDir, "bin", "codex.js"), "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n")
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte("{\"name\":\"@openai/codex\",\"version\":\"1.0.0\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../lib/node_modules/@openai/codex/bin/codex.js", filepath.Join(prefix, "bin", "codex")); err != nil {
+		t.Fatal(err)
+	}
+	tarball := filepath.Join(home, ".cache", "clifleet", "npm", "codex", "openai-codex-2.0.0.tgz")
+	writeTarGz(t, tarball, map[string]string{
+		"package/package.json": "{\"name\":\"@openai/codex\",\"version\":\"2.0.0\"}\n",
+		"package/bin/codex.js": "#!/bin/sh\nprintf 'codex-cli 2.0.0\\n'\n",
+	})
+	if err := os.MkdirAll(filepath.Join(home, ".cache", "clifleet", "staged"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".cache", "clifleet", "staged", "codex"), []byte("npm\t@openai/codex\t"+tarball+"\t2.0.0\t-\t-\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "npm.log")
+	writeExe(t, filepath.Join(bin, "npm"), `#!/bin/sh
+printf '%s\n' "$*" >> "$NPM_LOG"
+if [ "$1" = root ]; then printf '%s\n' "$LIVE_ROOT"; exit 0; fi
+if [ "$1" = install ]; then
+  prefix=.
+  prev=
+  for a in "$@"; do
+    if [ "$prev" = --prefix ]; then prefix=$a; fi
+    prev=$a
+  done
+  mkdir -p "$prefix/lib/node_modules/@openai/codex/bin"
+  printf '%s\n' '{"name":"@openai/codex","version":"2.0.0","bin":{"codex":"bin/codex.js"}}' > "$prefix/lib/node_modules/@openai/codex/package.json"
+  printf '%s\n' '#!/bin/sh' 'printf "codex-cli 2.0.0\n"' > "$prefix/lib/node_modules/@openai/codex/bin/codex.js"
+  chmod 755 "$prefix/lib/node_modules/@openai/codex/bin/codex.js"
+  exit 0
+fi
+exit 0
+`)
+	script, err := ApplyScript([]Tool{{Name: "codex", Binary: "codex"}}, []string{filepath.Join(prefix, "bin"), bin}, []StageStep{{
+		Tool: "codex", Kind: catalog.MethodNpm, Package: "@openai/codex",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := runSh(t, script, []string{
+		"PATH=" + filepath.Join(prefix, "bin") + ":" + bin + ":/usr/bin:/bin",
+		"HOME=" + home,
+		"NPM_LOG=" + logPath,
+		"LIVE_ROOT=" + filepath.Join(prefix, "lib", "node_modules"),
+	})
+	results, _, err := ParseApply(out)
+	if err != nil || len(results) != 1 || results[0].Exit != 0 {
+		t.Fatalf("%v %+v\n%s", err, results, out)
+	}
+	if _, err := os.Stat(junk); !os.IsNotExist(err) {
+		t.Fatalf("junk dir still present: %v", err)
+	}
+	still, err := exec.Command(filepath.Join(prefix, "bin", "codex"), "--version").Output()
+	if err != nil || !strings.Contains(string(still), "2.0.0") {
+		t.Fatalf("codex after swap %v %q", err, still)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil || !strings.Contains(string(log), "--include=optional") {
+		t.Fatalf("install log:\n%s", log)
 	}
 }
 

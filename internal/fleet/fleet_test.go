@@ -175,7 +175,7 @@ tools = ["claude", "codex", "cursor", "opencode"]
 	for _, line := range dry.Lines() {
 		saw[line[1]] = strings.Join(line, " | ")
 	}
-	if !strings.Contains(saw["claude"], "dry-run:") || !strings.Contains(saw["claude"], "claude-code/releases/latest/download/claude-") {
+	if !strings.Contains(saw["claude"], "dry-run:") || !strings.Contains(saw["claude"], "downloads.claude.ai/claude-code-releases/") {
 		t.Fatalf("claude %s", saw["claude"])
 	}
 	if !strings.Contains(saw["codex"], "dry-run:") || !strings.Contains(saw["codex"], "npm pack") || !strings.Contains(saw["codex"], "@openai/codex@latest") {
@@ -486,10 +486,10 @@ func TestDefaultUpgradeFetchesBeforeApply(t *testing.T) {
 [[hosts]]
 name = "box"
 ssh = "box"
-tools = ["agent", "codex"]
+tools = ["agy", "codex"]
 `)
 	probe := probeOut(
-		present("agent", "/home/a/.local/bin/agent", "/home/a/.local/bin/agent", "1.0.0"),
+		present("agy", "/home/a/.local/bin/agy", "/home/a/.local/bin/agy", "1.0.0"),
 		withPkg(present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "0.1.0"), "@openai/codex"),
 	)
 	fake := &fakeRunner{
@@ -500,7 +500,7 @@ tools = ["agent", "codex"]
 			actionLine("apply", "codex", "0", "/cache/codex.tgz"),
 			"clifleet-probe/1",
 			withPkg(present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "9.0.0"), "@openai/codex"),
-			present("agent", "/home/a/.local/bin/agent", "/home/a/.local/bin/agent", "1.0.0"),
+			present("agy", "/home/a/.local/bin/agy", "/home/a/.local/bin/agy", "1.0.0"),
 		}, "\n") + "\n"},
 	}
 	got, err := Upgrade(context.Background(), cfg, Options{}, fake)
@@ -511,7 +511,7 @@ tools = ["agent", "codex"]
 		t.Fatal(got.Summary())
 	}
 	joined := strings.Join(fake.Scripts(), "\n")
-	if strings.Contains(joined, "clifleet-upgrade/1") || strings.Contains(joined, "'agent' 'update'") {
+	if strings.Contains(joined, "clifleet-upgrade/1") || strings.Contains(joined, "'agy' 'update'") {
 		t.Fatalf("default upgrade one-shot a native tool:\n%s", joined)
 	}
 	if !strings.Contains(joined, "stage_npm 'codex'") || !strings.Contains(joined, "apply_npm 'codex'") {
@@ -524,9 +524,9 @@ tools = ["agent", "codex"]
 				if row.Status != StApplied || !strings.Contains(row.Version, "0.1.0 → 9.0.0") {
 					t.Fatalf("codex %+v", row)
 				}
-			case "agent":
+			case "agy":
 				if row.Status != StNoStage {
-					t.Fatalf("agent %+v", row)
+					t.Fatalf("agy %+v", row)
 				}
 			}
 		}

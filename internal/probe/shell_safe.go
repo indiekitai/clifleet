@@ -174,6 +174,45 @@ cf_tarball_engines() {
   fi
 }
 
+cf_tarball_name() {
+  out=$cf_dir/name.json
+  if tar -xOf "$1" package/package.json > "$out" 2>/dev/null && [ -s "$out" ]; then
+    cf_json_string "$out" name
+  fi
+}
+
+cf_codex_npm_platform() {
+  os=$(uname -s)
+  arch=$(uname -m)
+  case "$os:$arch" in
+    Darwin:arm64|Darwin:aarch64) printf '%s\n' darwin-arm64 ;;
+    Darwin:x86_64)
+      if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then
+        printf '%s\n' darwin-arm64
+      else
+        printf '%s\n' darwin-x64
+      fi
+      ;;
+    Linux:aarch64|Linux:arm64) printf '%s\n' linux-arm64 ;;
+    Linux:x86_64|Linux:amd64) printf '%s\n' linux-x64 ;;
+    *) return 1 ;;
+  esac
+}
+
+cf_restore_labeled() {
+  dest=$1
+  label=$2
+  parent=$(dirname "$dest")
+  prev=$parent/.clifleet-$label-prev
+  if [ -d "$prev" ]; then
+    failed=$parent/.clifleet-$label-failed
+    rm -rf "$failed"
+    mv "$dest" "$failed" 2>/dev/null || true
+    mv "$prev" "$dest" || true
+    rm -rf "$failed"
+  fi
+}
+
 cf_semver_line() {
   printf '%s\n' "$1" | tr -c '0-9.\n' ' ' | awk '{
     for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) { print $i; exit }
@@ -198,13 +237,13 @@ cf_engines_status() {
     ''|-) printf 'ok\n'; return 0 ;;
   esac
   have=$(cf_node_have) || {
-    printf 'blocked: node not on PATH (package requires %s)\n' "$eng"
+    printf 'blocked: needs Node %s (node not on PATH)\n' "$eng"
     return 0
   }
   have_one=$(printf '%s\n' "$have" | head -n 1)
   case $(cf_range_result "$have_one" "$eng") in
     yes) printf 'ok\n' ;;
-    no) printf 'blocked: requires Node %s (host has %s)\n' "$eng" "$have_one" ;;
+    no) printf 'blocked: needs Node %s (host has %s)\n' "$eng" "$have_one" ;;
     *) printf 'ok\n' ;;
   esac
 }
@@ -289,7 +328,20 @@ cf_download() {
   url=$2
   case $url in
     https://github.com/openai/codex/releases/latest/download/codex-package-*.tar.gz) ;;
-    https://github.com/anthropics/claude-code/releases/latest/download/claude-*.tar.gz) ;;
+    https://downloads.claude.ai/claude-code-releases/latest) ;;
+    https://downloads.claude.ai/claude-code-releases/[0-9]*.[0-9]*.[0-9]*/manifest.json) ;;
+    https://downloads.claude.ai/claude-code-releases/[0-9]*.[0-9]*.[0-9]*/manifest.json.sig) ;;
+    https://downloads.claude.ai/claude-code-releases/[0-9]*.[0-9]*.[0-9]*/darwin-arm64/claude) ;;
+    https://downloads.claude.ai/claude-code-releases/[0-9]*.[0-9]*.[0-9]*/darwin-x64/claude) ;;
+    https://downloads.claude.ai/claude-code-releases/[0-9]*.[0-9]*.[0-9]*/linux-arm64/claude) ;;
+    https://downloads.claude.ai/claude-code-releases/[0-9]*.[0-9]*.[0-9]*/linux-x64/claude) ;;
+    https://downloads.claude.ai/claude-code-releases/[0-9]*.[0-9]*.[0-9]*/linux-arm64-musl/claude) ;;
+    https://downloads.claude.ai/claude-code-releases/[0-9]*.[0-9]*.[0-9]*/linux-x64-musl/claude) ;;
+    https://cursor.com/install) ;;
+    https://downloads.cursor.com/lab/[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-*/darwin/arm64/agent-cli-package.tar.gz) ;;
+    https://downloads.cursor.com/lab/[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-*/darwin/x64/agent-cli-package.tar.gz) ;;
+    https://downloads.cursor.com/lab/[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-*/linux/arm64/agent-cli-package.tar.gz) ;;
+    https://downloads.cursor.com/lab/[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-*/linux/x64/agent-cli-package.tar.gz) ;;
     *)
       printf '%s\n' 'refusing download url' >&2
       return 1
@@ -314,6 +366,7 @@ cf_apply_npm_safe() {
   tool=$1
   pkg=$2
   tarball=$3
+  plat_tarball=$4
   staged_ver=$(cf_tarball_version "$tarball")
   eng=$(cf_tarball_engines "$tarball")
   live_path=$(command -v "$tool" 2>/dev/null || true)
@@ -326,7 +379,7 @@ cf_apply_npm_safe() {
     fi
   fi
   if cf_versions_match "$live_ver" "$staged_ver"; then
-    cf_report apply "$tool" 0 "already $staged_ver"
+    cf_report apply "$tool" current "up to date"
     return 0
   fi
   est=$(cf_engines_status "$eng")
@@ -337,7 +390,7 @@ cf_apply_npm_safe() {
       return 0
       ;;
   esac
-  if ! cf_npm_swap "$tool" "$pkg" "$tarball"; then
+  if ! cf_npm_swap "$tool" "$pkg" "$tarball" "$plat_tarball"; then
     detail=$cf_swap_err
     [ -n "$detail" ] || detail="npm install failed"
     cf_report apply "$tool" 1 "$detail"
@@ -346,15 +399,29 @@ cf_apply_npm_safe() {
   cf_report apply "$tool" 0 "$tarball"
 }
 
+cf_clear_codex_junk() {
+  parent=$1
+  [ -d "$parent" ] || return 0
+  # Interrupted npm installs leave @openai/.codex-* next to the live package.
+  # Those are junk. The live codex directory is not one of them.
+  find "$parent" -mindepth 1 -maxdepth 1 -type d -name '.codex-*' -exec rm -rf {} + 2>/dev/null || true
+}
+
 cf_npm_swap() {
   tool=$1
   pkg=$2
   tarball=$3
+  plat_tarball=$4
   cf_swap_err=
   prefix=$cf_dir/npm-prefix
   rm -rf "$prefix"
   mkdir -p "$prefix" || { cf_swap_err="could not create temp prefix"; return 1; }
-  if ! npm install -g --prefix "$prefix" --no-fund --no-audit "$tarball" </dev/null >&2; then
+  if [ -n "$plat_tarball" ] && [ "$plat_tarball" != - ] && [ -f "$plat_tarball" ]; then
+    if ! npm install -g --prefix "$prefix" --include=optional --no-fund --no-audit "$tarball" "$plat_tarball" </dev/null >&2; then
+      cf_swap_err="npm install failed"
+      return 1
+    fi
+  elif ! npm install -g --prefix "$prefix" --include=optional --no-fund --no-audit "$tarball" </dev/null >&2; then
     cf_swap_err="npm install failed"
     return 1
   fi
@@ -379,6 +446,7 @@ cf_npm_swap() {
   dest=$live_root/$pkg
   parent=$(dirname "$dest")
   mkdir -p "$parent" "$live_bin" || { cf_swap_err="could not create package dir"; return 1; }
+  cf_clear_codex_junk "$parent"
   stage=$parent/.clifleet-$tool-new
   prev=$parent/.clifleet-$tool-prev
   if [ ! -e "$dest" ] && [ -d "$prev" ]; then
@@ -401,6 +469,44 @@ cf_npm_swap() {
     cf_swap_err="could not swap staged package into place"
     return 1
   fi
+  plat_dest=
+  if [ -n "$plat_tarball" ] && [ "$plat_tarball" != - ] && [ -f "$plat_tarball" ]; then
+    plat_name=$(cf_tarball_name "$plat_tarball")
+    psrc=$prefix/lib/node_modules/$plat_name
+    if [ ! -d "$psrc" ]; then
+      psrc=$prefix/node_modules/$plat_name
+    fi
+    if [ -n "$plat_name" ] && [ -d "$psrc" ]; then
+      plat_dest=$live_root/$plat_name
+      pparent=$(dirname "$plat_dest")
+      mkdir -p "$pparent" || { cf_swap_err="could not create platform dir"; cf_restore_labeled "$dest" "$tool"; return 1; }
+      pstage=$pparent/.clifleet-plat-new
+      pprev=$pparent/.clifleet-plat-prev
+      rm -rf "$pstage"
+      if ! cp -a "$psrc" "$pstage"; then
+        cf_swap_err="could not stage platform package"
+        cf_restore_labeled "$dest" "$tool"
+        return 1
+      fi
+      if [ -e "$plat_dest" ] || [ -L "$plat_dest" ]; then
+        rm -rf "$pprev"
+        if ! mv "$plat_dest" "$pprev"; then
+          rm -rf "$pstage"
+          cf_swap_err="could not move platform package aside"
+          cf_restore_labeled "$dest" "$tool"
+          return 1
+        fi
+      fi
+      if ! mv "$pstage" "$plat_dest"; then
+        if [ -d "$pprev" ] && [ ! -e "$plat_dest" ]; then
+          mv "$pprev" "$plat_dest" || true
+        fi
+        cf_swap_err="could not swap platform package"
+        cf_restore_labeled "$dest" "$tool"
+        return 1
+      fi
+    fi
+  fi
   cf_link_npm_bins "$dest" "$live_bin" || true
   check=$live_bin/$tool
   if [ ! -e "$check" ] && [ ! -L "$check" ]; then
@@ -408,18 +514,18 @@ cf_npm_swap() {
   fi
   if [ -n "$check" ]; then
     if ! cf_cap 10 "$cf_dir/checkver" "$check" --version; then
-      if [ -d "$prev" ]; then
-        failed=$parent/.clifleet-$tool-failed
-        rm -rf "$failed"
-        mv "$dest" "$failed" 2>/dev/null || true
-        mv "$prev" "$dest" || true
-        rm -rf "$failed"
+      if [ -n "$plat_dest" ]; then
+        cf_restore_labeled "$plat_dest" plat
       fi
+      cf_restore_labeled "$dest" "$tool"
       cf_swap_err="new package did not run; previous install restored"
       return 1
     fi
   fi
   rm -rf "$prev"
+  if [ -n "$plat_dest" ]; then
+    rm -rf "$(dirname "$plat_dest")/.clifleet-plat-prev"
+  fi
   return 0
 }
 
@@ -473,7 +579,7 @@ cf_codex_target() {
   esac
 }
 
-cf_claude_asset() {
+cf_claude_platform() {
   os=$(uname -s)
   arch=$(uname -m)
   libc=gnu
@@ -483,20 +589,71 @@ cf_claude_asset() {
     fi
   fi
   case "$os:$arch:$libc" in
-    Darwin:arm64:*|Darwin:aarch64:*) printf '%s\n' 'claude-darwin-arm64.tar.gz' ;;
+    Darwin:arm64:*|Darwin:aarch64:*) printf '%s\n' darwin-arm64 ;;
     Darwin:x86_64:*)
       if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then
-        printf '%s\n' 'claude-darwin-arm64.tar.gz'
+        printf '%s\n' darwin-arm64
       else
-        printf '%s\n' 'claude-darwin-x64.tar.gz'
+        printf '%s\n' darwin-x64
       fi
       ;;
-    Linux:aarch64:musl|Linux:arm64:musl) printf '%s\n' 'claude-linux-arm64-musl.tar.gz' ;;
-    Linux:aarch64:*|Linux:arm64:*) printf '%s\n' 'claude-linux-arm64.tar.gz' ;;
-    Linux:x86_64:musl|Linux:amd64:musl) printf '%s\n' 'claude-linux-x64-musl.tar.gz' ;;
-    Linux:x86_64:*|Linux:amd64:*) printf '%s\n' 'claude-linux-x64.tar.gz' ;;
+    Linux:aarch64:musl|Linux:arm64:musl) printf '%s\n' linux-arm64-musl ;;
+    Linux:aarch64:*|Linux:arm64:*) printf '%s\n' linux-arm64 ;;
+    Linux:x86_64:musl|Linux:amd64:musl) printf '%s\n' linux-x64-musl ;;
+    Linux:x86_64:*|Linux:amd64:*) printf '%s\n' linux-x64 ;;
     *) return 1 ;;
   esac
+}
+
+cf_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+    return
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$1" | awk '{print $NF}'
+    return
+  fi
+  return 1
+}
+
+cf_manifest_checksum() {
+  file=$1
+  plat=$2
+  awk -v plat="$plat" '
+    $0 ~ "\"" plat "\"[[:space:]]*:" { inplat = 1 }
+    inplat && $0 ~ /"checksum"/ {
+      if (match($0, /[0-9a-fA-F]{64}/)) {
+        print substr($0, RSTART, RLENGTH)
+        exit
+      }
+    }
+  ' "$file"
+}
+
+cf_cursor_platform() {
+  os=$(uname -s)
+  arch=$(uname -m)
+  case "$os" in
+    Darwin) os=darwin ;;
+    Linux) os=linux ;;
+    *) return 1 ;;
+  esac
+  case "$arch" in
+    x86_64|amd64) arch=x64 ;;
+    arm64|aarch64) arch=arm64 ;;
+    *) return 1 ;;
+  esac
+  if [ "$os" = darwin ] && [ "$arch" = x64 ]; then
+    if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then
+      arch=arm64
+    fi
+  fi
+  printf '%s/%s\n' "$os" "$arch"
 }
 
 cf_release_fetch() {
@@ -548,8 +705,99 @@ stage_release_codex() {
 
 stage_release_claude() {
   tool=$1
-  asset=$(cf_claude_asset) || asset=
-  cf_release_fetch "$tool" claude "$asset" "https://github.com/anthropics/claude-code/releases/latest/download"
+  root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
+  dest="$root/release/$tool"
+  rm -rf "$dest"
+  mkdir -p "$dest" "$root/staged" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
+  plat=$(cf_claude_platform) || {
+    cf_report fetch "$tool" blocked "no Claude release for $(uname -s)/$(uname -m)"
+    return 0
+  }
+  if ! cf_download "$dest/latest" "https://downloads.claude.ai/claude-code-releases/latest"; then
+    cf_report fetch "$tool" 1 "could not read Claude release version"
+    return 0
+  fi
+  ver=$(tr -cd '0-9.' < "$dest/latest")
+  case $ver in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) cf_report fetch "$tool" 1 "Claude latest version is not a release number"; return 0 ;;
+  esac
+  base="https://downloads.claude.ai/claude-code-releases/$ver"
+  if ! cf_download "$dest/manifest.json" "$base/manifest.json"; then
+    cf_report fetch "$tool" 1 "could not download Claude manifest"
+    return 0
+  fi
+  cf_download "$dest/manifest.json.sig" "$base/manifest.json.sig" >/dev/null 2>&1 || rm -f "$dest/manifest.json.sig"
+  sum=$(cf_manifest_checksum "$dest/manifest.json" "$plat")
+  case $sum in
+    ????????????????????????????????????????????????????????????????) ;;
+    *) cf_report fetch "$tool" 1 "manifest has no checksum for $plat"; return 0 ;;
+  esac
+  case $sum in
+    *[!0-9a-fA-F]*) cf_report fetch "$tool" 1 "manifest checksum for $plat is not sha256"; return 0 ;;
+  esac
+  if ! cf_download "$dest/claude" "$base/$plat/claude"; then
+    cf_report fetch "$tool" 1 "could not download Claude binary"
+    return 0
+  fi
+  got=$(cf_sha256 "$dest/claude") || { cf_report fetch "$tool" 1 "sha256 tool missing"; return 0; }
+  got=$(printf '%s' "$got" | tr 'A-F' 'a-f')
+  sum=$(printf '%s' "$sum" | tr 'A-F' 'a-f')
+  if [ "$got" != "$sum" ]; then
+    cf_report fetch "$tool" 1 "Claude binary checksum did not match the manifest"
+    return 0
+  fi
+  chmod 755 "$dest/claude" 2>/dev/null || true
+  printf 'release\tclaude\t%s\t%s\n' "$ver" "$dest/claude" > "$root/staged/$tool.tmp" || {
+    cf_report fetch "$tool" 1 "could not write stamp"
+    return 0
+  }
+  mv -f "$root/staged/$tool.tmp" "$root/staged/$tool" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
+  cf_report fetch "$tool" 0 "$dest/claude"
+}
+
+stage_release_agent() {
+  cf_stage_cursor_agent "$1"
+}
+
+stage_release_cursor_agent() {
+  cf_stage_cursor_agent "$1"
+}
+
+cf_stage_cursor_agent() {
+  tool=$1
+  root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
+  dest="$root/release/$tool"
+  rm -rf "$dest"
+  mkdir -p "$dest" "$root/staged" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
+  pair=$(cf_cursor_platform) || {
+    cf_report fetch "$tool" blocked "no Cursor Agent build for $(uname -s)/$(uname -m)"
+    return 0
+  }
+  if ! cf_download "$dest/install.sh" "https://cursor.com/install"; then
+    cf_report fetch "$tool" 1 "could not read the Cursor Agent installer"
+    return 0
+  fi
+  ver=$(sed -n 's|.*downloads\.cursor\.com/lab/\([0-9][0-9][0-9][0-9]\.[0-9][0-9]\.[0-9][0-9]-[A-Za-z0-9][A-Za-z0-9]*\)/.*|\1|p' "$dest/install.sh" | head -n 1)
+  case $ver in
+    [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-*) ;;
+    *) cf_report fetch "$tool" blocked "Cursor installer did not publish a versioned download"; return 0 ;;
+  esac
+  url="https://downloads.cursor.com/lab/$ver/$pair/agent-cli-package.tar.gz"
+  if ! cf_download "$dest/agent-cli-package.tar.gz" "$url"; then
+    cf_report fetch "$tool" 1 "could not download Cursor Agent"
+    return 0
+  fi
+  if ! tar -tzf "$dest/agent-cli-package.tar.gz" >/dev/null 2>&1; then
+    cf_report fetch "$tool" 1 "Cursor Agent download is not a tarball"
+    return 0
+  fi
+  printf 'release\tcursor-agent\t%s\t%s\n' "$ver" "$dest/agent-cli-package.tar.gz" > "$root/staged/$tool.tmp" || {
+    cf_report fetch "$tool" 1 "could not write stamp"
+    return 0
+  }
+  mv -f "$root/staged/$tool.tmp" "$root/staged/$tool" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
+  cf_report fetch "$tool" 0 "$dest/agent-cli-package.tar.gz"
 }
 
 cf_read_release_stamp() {
@@ -631,7 +879,7 @@ apply_release_codex() {
     live_ver=$(cf_cmd_semver "$live" --version)
   fi
   if [ -n "$staged_ver" ] && [ "$staged_ver" = "$live_ver" ]; then
-    cf_report apply "$tool" 0 "already $staged_ver"
+    cf_report apply "$tool" current "up to date"
     return 0
   fi
   if [ -z "$staged_ver" ]; then
@@ -662,7 +910,7 @@ apply_release_codex() {
     cur=$(resolve "$root/current" 2>/dev/null || true)
     if [ "$cur" = "$dest" ]; then
       rm -rf "$stage"
-      cf_report apply "$tool" 0 "already $staged_ver"
+      cf_report apply "$tool" current "up to date"
       return 0
     fi
     if [ -e "$dest" ] || [ -L "$dest" ]; then
@@ -697,54 +945,190 @@ apply_release_codex() {
 apply_release_claude() {
   tool=$1
   cf_read_release_stamp "$tool" || return 0
+  ver=$cf_rel_a
   archive=$cf_rel_b
+  case $ver in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) cf_report apply "$tool" 1 "staged Claude version is not a release number"; return 0 ;;
+  esac
+  case $ver in
+    *[!0-9.]*) cf_report apply "$tool" 1 "refusing Claude version"; return 0 ;;
+  esac
   case $archive in
     *..*) cf_report apply "$tool" 1 "refusing archive path"; return 0 ;;
   esac
   if [ ! -f "$archive" ] || [ -L "$archive" ]; then
-    cf_report apply "$tool" 1 "staged archive missing"
+    cf_report apply "$tool" 1 "staged Claude binary missing"
     return 0
   fi
-  extract=$(cf_extract_archive "$archive") || { cf_report apply "$tool" 1 "could not extract Claude archive"; return 0; }
-  bin=$(find "$extract" -type f -name claude 2>/dev/null | head -n 1)
-  if [ -z "$bin" ]; then
-    count=$(find "$extract" -type f 2>/dev/null | wc -l | tr -d ' ')
-    if [ "$count" = 1 ]; then
-      bin=$(find "$extract" -type f 2>/dev/null | head -n 1)
-    fi
-  fi
-  if [ -z "$bin" ] || [ ! -f "$bin" ]; then
-    cf_report apply "$tool" 1 "staged Claude archive has no binary"
-    return 0
-  fi
-  chmod 755 "$bin" 2>/dev/null || true
-  staged_ver=$(cf_cmd_semver "$bin" --version)
   live=$(command -v claude 2>/dev/null || true)
-  live_ver=
-  if [ -n "$live" ]; then
-    live_ver=$(cf_cmd_semver "$live" --version)
-  fi
-  if [ -n "$staged_ver" ] && [ "$staged_ver" = "$live_ver" ]; then
-    cf_report apply "$tool" 0 "already $staged_ver"
-    return 0
-  fi
-  if [ -z "$staged_ver" ]; then
-    cf_report apply "$tool" 1 "staged Claude binary did not report a version"
-    return 0
-  fi
   if [ -z "$live" ]; then
     cf_report apply "$tool" 1 "claude is not on PATH"
     return 0
   fi
-  real=$(resolve "$live")
-  if ! cf_atomic_replace "$real" "$bin"; then
-    cf_report apply "$tool" 1 "could not replace Claude binary"
+  live_ver=$(cf_cmd_semver "$live" --version)
+  if [ -n "$live_ver" ] && [ "$live_ver" = "$ver" ]; then
+    cf_report apply "$tool" current "up to date"
     return 0
   fi
-  cf_report apply "$tool" 0 "$archive"
+  versions="${HOME}/.local/share/claude/versions"
+  mkdir -p "$versions" || { cf_report apply "$tool" 1 "could not create Claude versions dir"; return 0; }
+  dest="$versions/$ver"
+  tmp="$versions/.clifleet-$ver"
+  rm -f "$tmp"
+  cp "$archive" "$tmp" || { cf_report apply "$tool" 1 "could not copy Claude binary"; return 0; }
+  chmod 755 "$tmp" || { rm -f "$tmp"; cf_report apply "$tool" 1 "could not mark Claude executable"; return 0; }
+  mv -f "$tmp" "$dest" || { rm -f "$tmp"; cf_report apply "$tool" 1 "could not publish Claude version"; return 0; }
+  prev=
+  if [ -L "$live" ]; then
+    prev=$(readlink "$live" || true)
+    if ! cf_atomic_link "$live" "$dest"; then
+      cf_report apply "$tool" 1 "could not retarget claude symlink"
+      return 0
+    fi
+  else
+    real=$(resolve "$live")
+    if ! cf_atomic_replace "$real" "$dest"; then
+      cf_report apply "$tool" 1 "could not replace Claude binary"
+      return 0
+    fi
+  fi
+  got=$(cf_cmd_semver "$live" --version)
+  if [ "$got" != "$ver" ]; then
+    if [ -n "$prev" ]; then
+      cf_atomic_link "$live" "$prev" || true
+    fi
+    cf_report apply "$tool" 1 "staged Claude did not report $ver; previous binary restored"
+    return 0
+  fi
+  cf_report apply "$tool" 0 "$dest"
+}
+
+apply_release_agent() {
+  cf_apply_cursor_agent "$1"
+}
+
+apply_release_cursor_agent() {
+  cf_apply_cursor_agent "$1"
+}
+
+cf_apply_cursor_agent() {
+  tool=$1
+  cf_read_release_stamp "$tool" || return 0
+  ver=$cf_rel_a
+  archive=$cf_rel_b
+  case $ver in
+    [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-[A-Za-z0-9]*) ;;
+    *) cf_report apply "$tool" 1 "staged Cursor Agent version is not a release id"; return 0 ;;
+  esac
+  case $archive in
+    *..*) cf_report apply "$tool" 1 "refusing archive path"; return 0 ;;
+  esac
+  if [ ! -f "$archive" ] || [ -L "$archive" ]; then
+    cf_report apply "$tool" 1 "staged Cursor Agent archive missing"
+    return 0
+  fi
+  live=$(command -v "$tool" 2>/dev/null || true)
+  if [ -z "$live" ]; then
+    cf_report apply "$tool" 1 "$tool is not on PATH"
+    return 0
+  fi
+  live_line=$(cf_cap 10 "$cf_dir/cursor-live" "$live" --version && head -n 1 "$cf_dir/cursor-live" || true)
+  live_tok=$(printf '%s\n' "$live_line" | sed -n 's/.*\([0-9][0-9][0-9][0-9]\.[0-9][0-9]\.[0-9][0-9]-[A-Za-z0-9][A-Za-z0-9]*\).*/\1/p' | head -n 1)
+  if [ -n "$live_tok" ] && [ "$live_tok" = "$ver" ]; then
+    cf_report apply "$tool" current "up to date"
+    return 0
+  fi
+  extract=$(cf_extract_archive "$archive") || { cf_report apply "$tool" 1 "could not extract Cursor Agent"; return 0; }
+  bin=$(find "$extract" -type f -name cursor-agent 2>/dev/null | head -n 1)
+  if [ -z "$bin" ]; then
+    cf_report apply "$tool" 1 "staged Cursor Agent archive has no cursor-agent"
+    return 0
+  fi
+  versions="${HOME}/.local/share/cursor-agent/versions"
+  mkdir -p "$versions" || { cf_report apply "$tool" 1 "could not create Cursor Agent versions dir"; return 0; }
+  stage="$versions/.tmp-$ver"
+  final="$versions/$ver"
+  rm -rf "$stage"
+  mkdir -p "$stage" || { cf_report apply "$tool" 1 "could not stage Cursor Agent"; return 0; }
+  bindir=$(dirname "$bin")
+  cp -a "$bindir"/. "$stage"/ || { rm -rf "$stage"; cf_report apply "$tool" 1 "could not copy Cursor Agent"; return 0; }
+  chmod 755 "$stage/cursor-agent" 2>/dev/null || true
+  if [ -e "$final" ] || [ -L "$final" ]; then
+    rm -rf "$final"
+  fi
+  if ! mv "$stage" "$final"; then
+    rm -rf "$stage"
+    cf_report apply "$tool" 1 "could not publish Cursor Agent version"
+    return 0
+  fi
+  prev_agent=
+  prev_cursor=
+  prev_live=
+  if [ -L "${HOME}/.local/bin/agent" ]; then
+    prev_agent=$(readlink "${HOME}/.local/bin/agent" || true)
+    cf_atomic_link "${HOME}/.local/bin/agent" "$final/cursor-agent" || true
+  fi
+  if [ -L "${HOME}/.local/bin/cursor-agent" ]; then
+    prev_cursor=$(readlink "${HOME}/.local/bin/cursor-agent" || true)
+    cf_atomic_link "${HOME}/.local/bin/cursor-agent" "$final/cursor-agent" || true
+  fi
+  if [ -L "$live" ]; then
+    prev_live=$(readlink "$live" || true)
+    cf_atomic_link "$live" "$final/cursor-agent" || {
+      cf_report apply "$tool" 1 "could not retarget $tool symlink"
+      return 0
+    }
+  elif [ ! -L "${HOME}/.local/bin/$tool" ]; then
+    real=$(resolve "$live")
+    if ! cf_atomic_replace "$real" "$final/cursor-agent"; then
+      cf_report apply "$tool" 1 "could not replace $tool"
+      return 0
+    fi
+  fi
+  got_line=$(cf_cap 10 "$cf_dir/cursor-new" "$live" --version && head -n 1 "$cf_dir/cursor-new" || true)
+  got_tok=$(printf '%s\n' "$got_line" | sed -n 's/.*\([0-9][0-9][0-9][0-9]\.[0-9][0-9]\.[0-9][0-9]-[A-Za-z0-9][A-Za-z0-9]*\).*/\1/p' | head -n 1)
+  if [ "$got_tok" != "$ver" ]; then
+    if [ -n "$prev_live" ]; then cf_atomic_link "$live" "$prev_live" || true; fi
+    if [ -n "$prev_agent" ]; then cf_atomic_link "${HOME}/.local/bin/agent" "$prev_agent" || true; fi
+    if [ -n "$prev_cursor" ]; then cf_atomic_link "${HOME}/.local/bin/cursor-agent" "$prev_cursor" || true; fi
+    cf_report apply "$tool" 1 "staged Cursor Agent did not report $ver; previous symlink restored"
+    return 0
+  fi
+  cf_report apply "$tool" 0 "$final/cursor-agent"
 }
 `
 
 const fetchSafeShell = fetchHead + releaseRest
 
 const applySafeShell = fetchSafeShell + applyOnlyShell
+
+// codexPackShell is fetch-only. Apply must not contain `npm pack`.
+const codexPackShell = `
+cf_pack_codex_platform() {
+  dest=$1
+  ver=$2
+  plat=$(cf_codex_npm_platform) || return 1
+  case $ver in
+    *[!0-9A-Za-z._+-]*) return 1 ;;
+  esac
+  case $plat in
+    darwin-arm64|darwin-x64|linux-arm64|linux-x64) ;;
+    *) return 1 ;;
+  esac
+  spec="@openai/codex@${ver}-${plat}"
+  file=$(npm pack --loglevel=error --pack-destination "$dest" "$spec" </dev/null) || return 1
+  file=$(printf '%s\n' "$file" | sed '/^[[:space:]]*$/d' | tail -n 1)
+  case $file in
+    /*|./*|../*|*/*) tarball=$file ;;
+    *) tarball=$dest/$file ;;
+  esac
+  case $tarball in
+    *..*) return 1 ;;
+  esac
+  if [ ! -f "$tarball" ] || [ -L "$tarball" ]; then
+    return 1
+  fi
+  printf '%s\n' "$tarball"
+}
+`
