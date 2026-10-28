@@ -481,6 +481,39 @@ tools = ["codex", "opencode"]
 	}
 }
 
+func TestFetchTimeoutKeepsPartialSuccess(t *testing.T) {
+	cfg := parseFleet(t, `
+[[hosts]]
+name = "box"
+ssh = "box"
+tools = ["codex", "opencode"]
+`)
+	probe := probeOut(
+		withPkg(present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "0.1.0"), "@openai/codex"),
+		withBrew(present("opencode", "/opt/homebrew/bin/opencode", "/opt/homebrew/Cellar/opencode/1.0.0/bin/opencode", "1.0.0"), "formula", "opencode"),
+	)
+	fake := &selectiveRunner{
+		probe:   probe,
+		partial: "clifleet-fetch/1\n" + actionLine("fetch", "codex", "0", "/cache/codex.tgz") + "\n",
+	}
+	got, err := Upgrade(context.Background(), cfg, Options{Phase: PhaseFetch}, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saw := map[string]Row{}
+	for _, h := range got.Hosts {
+		for _, row := range h.Rows {
+			saw[row.Tool] = row
+		}
+	}
+	if saw["codex"].Status != StStaged || saw["codex"].Failed {
+		t.Fatalf("partial fetch should stay staged: %+v", saw["codex"])
+	}
+	if saw["opencode"].Status != StFailed {
+		t.Fatalf("opencode %+v", saw["opencode"])
+	}
+}
+
 func TestDefaultUpgradeFetchesBeforeApply(t *testing.T) {
 	cfg := parseFleet(t, `
 [[hosts]]
@@ -566,6 +599,7 @@ tools = ["openclaw"]
 
 type selectiveRunner struct {
 	probe   string
+	partial string
 	scripts []string
 }
 
@@ -574,6 +608,8 @@ func (s *selectiveRunner) Run(_ context.Context, target runner.Target, script st
 	switch {
 	case strings.Contains(script, "stage_brew 'opencode'"):
 		return "", "brew fetch hung", errString("timed out after 10m0s")
+	case strings.Contains(script, "stage_npm 'codex'") && s.partial != "":
+		return s.partial, "timed out after the codex line", errString("timed out after 10m0s")
 	case strings.Contains(script, "clifleet-fetch/1"):
 		return "clifleet-fetch/1\n" + actionLine("fetch", "codex", "0", "/cache/codex.tgz") + "\n", "", nil
 	default:

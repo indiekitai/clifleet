@@ -217,8 +217,9 @@ Fetch writes a cache on each host at `$XDG_CACHE_HOME/clifleet`, or `~/.cache/cl
 | --- | --- | --- |
 | npm global | `npm pack <pkg>@latest` into the cache | no-op when the staged version is already installed; otherwise `npm install -g --prefix <tmp>` and swap the package directory |
 | Homebrew formula or cask | `brew update`, then `brew fetch` into Homebrew's own cache | `brew upgrade` with auto-update off |
-| native Codex | `codex-package-<platform>.tar.gz` from `github.com/openai/codex` releases | atomic replace of the binary, or flip the standalone `current` link when the install is that layout |
+| native Codex | `https://releases.openai.com/codex/channels/latest`, then `codex-package-<triple>.tar.gz` for that version. GitHub `rust-v<version>` is the fallback | versioned release directory, then flip the standalone `current` symlink |
 | native Claude Code | version from `downloads.claude.ai/claude-code-releases/latest`, then `manifest.json` and `<version>/<platform>/claude`. The binary's SHA256 has to match the manifest | copy into `~/.local/share/claude/versions/<version>` and retarget `~/.local/bin/claude`. The previous version file stays |
+| native OpenCode | `https://opencode.ai/update/api/latest/cli/npm` (`@opencode/cli` at the npm 2.x version; GitHub latest can still be 1.x), then `npm pack` | same temp-prefix swap as other npm packages |
 | native Cursor Agent (`agent`, `cursor-agent`) | version read from the official `https://cursor.com/install` script, then `downloads.cursor.com/lab/<version>/<os>/<arch>/agent-cli-package.tar.gz` | extract into `~/.local/share/cursor-agent/versions/<version>` and retarget the existing symlink |
 
 Codex's native package is the documented GitHub release asset. Claude's native package is the manifest on `downloads.claude.ai`, not an HTML page. Cursor Agent's version comes from the official installer script's `downloads.cursor.com/lab/<version>/...` URL. An unsupported platform is `blocked`, not a guessed download. `claude update` and `agent update` are not used for these installs unless you pass `--one-shot`.

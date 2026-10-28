@@ -243,7 +243,7 @@ cf_engines_status() {
   have_one=$(printf '%s\n' "$have" | head -n 1)
   case $(cf_range_result "$have_one" "$eng") in
     yes) printf 'ok\n' ;;
-    no) printf 'blocked: needs Node %s (host has %s)\n' "$eng" "$have_one" ;;
+    no) printf 'blocked: needs Node %s (have %s)\n' "$eng" "$have_one" ;;
     *) printf 'ok\n' ;;
   esac
 }
@@ -328,6 +328,10 @@ cf_download() {
   url=$2
   case $url in
     https://github.com/openai/codex/releases/latest/download/codex-package-*.tar.gz) ;;
+    https://github.com/openai/codex/releases/download/rust-v[0-9]*.[0-9]*.[0-9]*/codex-package-*.tar.gz) ;;
+    https://releases.openai.com/codex/channels/latest) ;;
+    https://releases.openai.com/codex/releases/[0-9]*.[0-9]*.[0-9]*/codex-package-*.tar.gz) ;;
+    https://opencode.ai/update/api/latest/cli/npm) ;;
     https://downloads.claude.ai/claude-code-releases/latest) ;;
     https://downloads.claude.ai/claude-code-releases/[0-9]*.[0-9]*.[0-9]*/manifest.json) ;;
     https://downloads.claude.ai/claude-code-releases/[0-9]*.[0-9]*.[0-9]*/manifest.json.sig) ;;
@@ -367,8 +371,14 @@ cf_apply_npm_safe() {
   pkg=$2
   tarball=$3
   plat_tarball=$4
-  staged_ver=$(cf_tarball_version "$tarball")
-  eng=$(cf_tarball_engines "$tarball")
+  staged_ver=$5
+  eng=$6
+  if [ -z "$staged_ver" ] || [ "$staged_ver" = - ]; then
+    staged_ver=$(cf_tarball_version "$tarball")
+  fi
+  if [ -z "$eng" ] || [ "$eng" = - ]; then
+    eng=$(cf_tarball_engines "$tarball")
+  fi
   live_path=$(command -v "$tool" 2>/dev/null || true)
   live_ver=
   if [ -n "$live_path" ]; then
@@ -378,15 +388,17 @@ cf_apply_npm_safe() {
       live_ver=$(cf_cmd_semver "$live_path" --version)
     fi
   fi
-  if cf_versions_match "$live_ver" "$staged_ver"; then
-    cf_report apply "$tool" current "up to date"
+  have=$(cf_semver_line "$live_ver")
+  want=$(cf_semver_line "$staged_ver")
+  if [ -n "$have" ] && [ "$have" = "$want" ]; then
+    cf_report apply "$tool" skip "already $have"
     return 0
   fi
   est=$(cf_engines_status "$eng")
   case $est in
     ok) ;;
     *)
-      cf_report apply "$tool" blocked "${est#blocked: }"
+      cf_report apply "$tool" skip "${est#blocked: }"
       return 0
       ;;
   esac
@@ -399,12 +411,29 @@ cf_apply_npm_safe() {
   cf_report apply "$tool" 0 "$tarball"
 }
 
-cf_clear_codex_junk() {
-  parent=$1
+cf_clear_npm_junk() {
+  root=${1:?}
+  pkg=$2
+  case $root in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  name=${pkg##*/}
+  case $name in
+    ''|.*|*/*|*[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+  parent=$(dirname "$root/$pkg")
   [ -d "$parent" ] || return 0
-  # Interrupted npm installs leave @openai/.codex-* next to the live package.
-  # Those are junk. The live codex directory is not one of them.
-  find "$parent" -mindepth 1 -maxdepth 1 -type d -name '.codex-*' -exec rm -rf {} + 2>/dev/null || true
+  # Interrupted npm global installs leave .$name-* beside the live package.
+  # The live directory itself is not matched. set -f is on for the script.
+  set +f
+  for junk in "$parent"/."$name"-*; do
+    [ -e "$junk" ] || continue
+    case $(basename "$junk") in
+      .$name-*) rm -rf "$junk" ;;
+    esac
+  done
+  set -f
 }
 
 cf_npm_swap() {
@@ -446,7 +475,7 @@ cf_npm_swap() {
   dest=$live_root/$pkg
   parent=$(dirname "$dest")
   mkdir -p "$parent" "$live_bin" || { cf_swap_err="could not create package dir"; return 1; }
-  cf_clear_codex_junk "$parent"
+  cf_clear_npm_junk "$live_root" "$pkg"
   stage=$parent/.clifleet-$tool-new
   prev=$parent/.clifleet-$tool-prev
   if [ ! -e "$dest" ] && [ -d "$prev" ]; then
@@ -695,12 +724,49 @@ cf_release_fetch() {
 
 stage_release_codex() {
   tool=$1
-  asset=
-  target=$(cf_codex_target) || target=
-  if [ -n "$target" ]; then
-    asset="codex-package-$target.tar.gz"
+  target=$(cf_codex_target) || {
+    cf_report fetch "$tool" blocked "no Codex release for $(uname -s)/$(uname -m)"
+    return 0
+  }
+  asset="codex-package-$target.tar.gz"
+  root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
+  dest="$root/release/$tool"
+  rm -rf "$dest"
+  mkdir -p "$dest" "$root/staged" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
+  if ! cf_download "$dest/channel.json" "https://releases.openai.com/codex/channels/latest"; then
+    cf_report fetch "$tool" 1 "could not read Codex release channel"
+    return 0
   fi
-  cf_release_fetch "$tool" codex "$asset" "https://github.com/openai/codex/releases/latest/download"
+  ver=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"rust-v\([0-9][0-9.]*\)".*/\1/p' "$dest/channel.json" | head -n 1)
+  case $ver in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) cf_report fetch "$tool" 1 "Codex channel did not name a version"; return 0 ;;
+  esac
+  case $ver in
+    *[!0-9.]*) cf_report fetch "$tool" 1 "refusing Codex version"; return 0 ;;
+  esac
+  url="https://releases.openai.com/codex/releases/$ver/$asset"
+  if ! cf_download "$dest/$asset" "$url"; then
+    url="https://github.com/openai/codex/releases/download/rust-v$ver/$asset"
+    if ! cf_download "$dest/$asset" "$url"; then
+      cf_report fetch "$tool" 1 "could not download Codex package"
+      return 0
+    fi
+  fi
+  if ! tar -tzf "$dest/$asset" >/dev/null 2>&1; then
+    cf_report fetch "$tool" 1 "downloaded archive is not a tarball"
+    return 0
+  fi
+  printf 'release\tcodex\t%s\t%s\n' "$asset" "$dest/$asset" > "$root/staged/$tool.tmp" || {
+    cf_report fetch "$tool" 1 "could not write stamp"
+    return 0
+  }
+  mv -f "$root/staged/$tool.tmp" "$root/staged/$tool" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
+  cf_report fetch "$tool" 0 "$dest/$asset"
+}
+
+apply_release_opencode() {
+  apply_npm "$1"
 }
 
 stage_release_claude() {
@@ -1130,5 +1196,58 @@ cf_pack_codex_platform() {
     return 1
   fi
   printf '%s\n' "$tarball"
+}
+
+stage_release_opencode() {
+  tool=$1
+  root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
+  dest="$root/npm/$tool"
+  rm -rf "$dest"
+  mkdir -p "$dest" "$root/staged" "$root/release/$tool" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
+  if ! cf_download "$root/release/$tool/latest.json" "https://opencode.ai/update/api/latest/cli/npm"; then
+    cf_report fetch "$tool" 1 "could not read OpenCode release"
+    return 0
+  fi
+  pkg=$(sed -n 's/.*"package"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/release/$tool/latest.json" | head -n 1)
+  ver=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' "$root/release/$tool/latest.json" | head -n 1)
+  case $pkg in
+    @opencode/cli|opencode-ai) ;;
+    *) cf_report fetch "$tool" 1 "OpenCode release did not name a package"; return 0 ;;
+  esac
+  case $ver in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) cf_report fetch "$tool" 1 "OpenCode release did not name a version"; return 0 ;;
+  esac
+  file=$(npm pack --loglevel=error --pack-destination "$dest" "$pkg@$ver" </dev/null) || {
+    cf_report fetch "$tool" 1 "npm pack failed"
+    return 0
+  }
+  file=$(printf '%s\n' "$file" | sed '/^[[:space:]]*$/d' | tail -n 1)
+  case $file in
+    /*|./*|../*|*/*) tarball=$file ;;
+    *) tarball=$dest/$file ;;
+  esac
+  case $tarball in
+    "$dest"/*.tgz) ;;
+    *) cf_report fetch "$tool" 1 "npm pack did not name a tarball"; return 0 ;;
+  esac
+  if [ ! -f "$tarball" ] || [ -L "$tarball" ]; then
+    cf_report fetch "$tool" 1 "missing tarball"
+    return 0
+  fi
+  gotver=$(cf_tarball_version "$tarball")
+  [ -n "$gotver" ] || gotver=$ver
+  eng=$(cf_tarball_engines "$tarball")
+  [ -n "$eng" ] || eng=-
+  printf 'npm\t%s\t%s\t%s\t%s\t-\n' "$pkg" "$tarball" "$gotver" "$eng" > "$root/staged/$tool.tmp" || {
+    cf_report fetch "$tool" 1 "could not write stamp"
+    return 0
+  }
+  mv -f "$root/staged/$tool.tmp" "$root/staged/$tool" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
+  est=$(cf_engines_status "$eng")
+  case $est in
+    ok) cf_report fetch "$tool" 0 "$tarball" ;;
+    *) cf_report fetch "$tool" blocked "${est#blocked: }" ;;
+  esac
 }
 `

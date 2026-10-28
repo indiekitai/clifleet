@@ -65,7 +65,7 @@ func TestPlanStageNoStageAndSkips(t *testing.T) {
 	if native.Action != ActionStage || native.Kind != KindRelease || native.Release != "codex" || native.Fetch == nil || native.Apply == nil {
 		t.Fatalf("native codex %+v", native)
 	}
-	if !strings.Contains(native.Fetch.Display, "github.com/openai/codex/releases/latest/download/codex-package-") {
+	if !strings.Contains(native.Fetch.Display, "https://releases.openai.com/codex/releases/") || !strings.Contains(native.Fetch.Display, "codex-package-") {
 		t.Fatalf("codex fetch %q", native.Fetch.Display)
 	}
 	claude := PlanStage(Resolve("claude", nil), present("claude", "/home/a/.local/bin/claude", "/home/a/.local/bin/claude", "2.1.44"), "")
@@ -130,9 +130,9 @@ func TestPlanStageNoStageAndSkips(t *testing.T) {
 		t.Fatalf("yarn %+v", yarn)
 	}
 
-	opencode := PlanStage(Resolve("opencode", nil), present("opencode", "/usr/local/bin/opencode", "/usr/local/lib/node_modules/opencode/bin/opencode", "1.0.0"), "")
-	if opencode.Action != ActionNoStage || opencode.Method != MethodNative {
-		t.Fatalf("opencode npm without a package should stay on the native updater: %+v", opencode)
+	opencode := PlanStage(Resolve("opencode", nil), present("opencode", "/home/a/.local/bin/opencode", "/home/a/.local/bin/opencode", "1.0.0"), "")
+	if opencode.Action != ActionStage || opencode.Release != "opencode" || !strings.Contains(opencode.Fetch.Display, "opencode.ai/update/api/latest/cli/npm") {
+		t.Fatalf("native opencode should stage from the npm channel: %+v", opencode)
 	}
 }
 

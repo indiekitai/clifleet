@@ -89,6 +89,21 @@ func runStageSteps(ctx context.Context, target runner.Target, run runner.Runner,
 			logs = append(logs, stderr)
 		}
 		if err != nil {
+			// A host timeout still returns whatever CF1 lines were printed.
+			// A tool that already reported success is not failed with its siblings.
+			if phase == PhaseFetch {
+				if got, perr := probe.ParseFetch(out); perr == nil {
+					for _, res := range got {
+						if res.Tool == step.Tool {
+							actions[step.Tool] = res
+							break
+						}
+					}
+					if _, ok := actions[step.Tool]; ok {
+						continue
+					}
+				}
+			}
 			actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: err.Error()}
 			continue
 		}
@@ -256,6 +271,16 @@ func renderStageRow(name string, p plan, phase string, dry bool, actions map[str
 		return row
 	}
 	if res.Skip != "" {
+		if strings.HasPrefix(res.Skip, "already ") {
+			row.Status = StCurrent
+			row.Detail = ""
+			return row
+		}
+		if strings.HasPrefix(res.Skip, "needs Node ") {
+			row.Status = StBlocked
+			row.Detail = res.Skip
+			return row
+		}
 		row.Status = StSkipped
 		row.Detail = res.Skip
 		return row

@@ -108,6 +108,36 @@ cf_cap() {
   return "$status"
 }
 
+# cf_limit SECONDS CMD... runs CMD with stdin /dev/null and kills it when
+# SECONDS elapses. Unlike cf_cap, stdout is left attached so CF1 lines still
+# reach the script. Exit 124 means the limit fired.
+cf_limit() {
+  secs=$1
+  shift
+  flag=$cf_dir/limit.$$
+  rm -f "$flag"
+  "$@" </dev/null &
+  pid=$!
+  (
+    sleep "$secs"
+    if kill -0 "$pid" 2>/dev/null; then
+      printf '1\n' >"$flag"
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  ) </dev/null >/dev/null 2>&1 &
+  kpid=$!
+  status=0
+  wait "$pid" 2>/dev/null || status=$?
+  kill "$kpid" 2>/dev/null || true
+  wait "$kpid" 2>/dev/null || true
+  if [ -f "$flag" ]; then
+    return 124
+  fi
+  return "$status"
+}
+
 resolve() {
   target=$1
   i=0
@@ -302,30 +332,28 @@ func writePathFn(b *strings.Builder, name, helper string, extra []string) error 
 	return nil
 }
 
-// brewEnvSnippet loads Homebrew the way a login shell does: eval "$(brew shellenv)".
-// Only export assignments are applied. The binary is looked up by its usual
-// absolute paths so a non-interactive ssh (sh -s, no TTY) still finds it.
+// brewEnvSnippet is the non-interactive equivalent of a login shell's
+// eval "$(brew shellenv)". Absolute paths are checked first because ssh -T
+// starts with PATH=/usr/bin:/bin:/usr/sbin:/sbin. Output is capped so a stuck
+// brew cannot hold the probe. This is not bash -lc.
 const brewEnvSnippet = `
 cf_brew_env() {
   brewbin=
-  for c in /opt/homebrew/bin/brew /usr/local/bin/brew /home/linuxbrew/.linuxbrew/bin/brew ${HOME:+"$HOME/.linuxbrew/bin/brew"}; do
-    if [ -n "$c" ] && [ -x "$c" ]; then
-      brewbin=$c
-      break
-    fi
-  done
+  if [ -x /opt/homebrew/bin/brew ]; then
+    brewbin=/opt/homebrew/bin/brew
+  elif [ -x /usr/local/bin/brew ]; then
+    brewbin=/usr/local/bin/brew
+  elif [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
+    brewbin=/home/linuxbrew/.linuxbrew/bin/brew
+  elif command -v brew >/dev/null 2>&1; then
+    brewbin=$(command -v brew)
+  fi
   if [ -z "$brewbin" ]; then
     return 0
   fi
   envfile=$cf_dir/brew.env
   if cf_cap 5 "$envfile" "$brewbin" shellenv; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      case $line in
-        export\ [A-Za-z_][A-Za-z0-9_]*=*)
-          eval "$line"
-          ;;
-      esac
-    done < "$envfile"
+    eval "$(cat "$envfile")"
   fi
 }
 `
@@ -355,6 +383,7 @@ if [ -n "${HOME:-}" ] && [ -s "$HOME/.nvm/nvm.sh" ]; then
   fi
 fi
 cf_ensure_path
+cf_brew_env
 hash -r 2>/dev/null || true
 export PATH
 `

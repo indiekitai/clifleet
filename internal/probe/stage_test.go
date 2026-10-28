@@ -41,8 +41,8 @@ func TestStageScriptsStayInTheirPhase(t *testing.T) {
 			t.Fatalf("fetch script contains %q", bad)
 		}
 	}
-	if strings.Count(fetch, "brew update </dev/null") != 1 {
-		t.Fatalf("brew update should run from one place, got %d", strings.Count(fetch, "brew update </dev/null"))
+	if strings.Count(fetch, "brew update </dev/null") != 2 {
+		t.Fatalf("brew update should be the shared preamble plus the stage_brew fallback, got %d", strings.Count(fetch, "brew update </dev/null"))
 	}
 
 	apply, err := ApplyScript(
@@ -554,7 +554,7 @@ func TestNpmApplySkipsCurrentAndRestoresOnFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	if len(results) != 1 || !results[0].Current || !strings.Contains(results[0].Detail, "up to date") {
+	if len(results) != 1 || results[0].Skip == "" || !strings.Contains(results[0].Skip, "already 1.2.3") {
 		t.Fatalf("current apply %+v\n%s", results, out)
 	}
 	assertNpmSilent(t, logPath)
@@ -680,13 +680,18 @@ func TestCodexReleaseFetchThenSwap(t *testing.T) {
 	})
 	writeExe(t, filepath.Join(bin, "curl"), `#!/bin/sh
 out=
+url=
 prev=
 for a in "$@"; do
   printf '%s\n' "$a" >> "$CURL_LOG"
   if [ "$prev" = -o ]; then out=$a; fi
+  case $a in http*) url=$a ;; esac
   prev=$a
 done
-cp "$CURL_BODY" "$out"
+case $url in
+  */channels/latest) printf '%s\n' '{"tag_name":"rust-v1.2.3"}' > "$out" ;;
+  *) cp "$CURL_BODY" "$out" ;;
+esac
 `)
 	writeExe(t, filepath.Join(bin, "codex"), "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n")
 	logPath := filepath.Join(root, "curl.log")
@@ -714,7 +719,7 @@ cp "$CURL_BODY" "$out"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(logged), "https://github.com/openai/codex/releases/latest/download/codex-package-") || !strings.Contains(string(logged), ".tar.gz") {
+	if !strings.Contains(string(logged), "https://releases.openai.com/codex/releases/1.2.3/codex-package-") || !strings.Contains(string(logged), ".tar.gz") {
 		t.Fatalf("curl url:\n%s", logged)
 	}
 	apply, err := ApplyScript([]Tool{{Name: "codex", Binary: "codex"}}, []string{bin}, []StageStep{step})
@@ -780,12 +785,17 @@ func TestCodexStandaloneLinkFlipLeavesOldRelease(t *testing.T) {
 	})
 	writeExe(t, filepath.Join(bin, "curl"), `#!/bin/sh
 out=
+url=
 prev=
 for a in "$@"; do
   if [ "$prev" = -o ]; then out=$a; fi
+  case $a in http*) url=$a ;; esac
   prev=$a
 done
-cp "$CURL_BODY" "$out"
+case $url in
+  */channels/latest) printf '%s\n' '{"tag_name":"rust-v1.2.3"}' > "$out" ;;
+  *) cp "$CURL_BODY" "$out" ;;
+esac
 `)
 	step := StageStep{Tool: "codex", Kind: catalog.KindRelease, Release: "codex"}
 	fetch, err := FetchScript([]string{bin, localBin}, []StageStep{step})

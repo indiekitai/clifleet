@@ -96,7 +96,7 @@ func PlanStage(spec Spec, obs Observation, methodOverride string) StagePlan {
 // cursor-agent's id uses an underscore because it becomes a shell function name.
 func nativeRelease(name string) (string, bool) {
 	switch name {
-	case "codex", "claude", "agent":
+	case "codex", "claude", "agent", "opencode":
 		return name, true
 	case "cursor-agent":
 		return "cursor_agent", true
@@ -109,9 +109,14 @@ func releaseStage(id string) StagePlan {
 	var fetchDisplay, applyDisplay string
 	switch id {
 	case "codex":
-		// openai/codex README and the installer's codex-package-<target>.tar.gz asset.
-		fetchDisplay = "curl -fsSL https://github.com/openai/codex/releases/latest/download/codex-package-<platform>.tar.gz"
+		// releases.openai.com channel latest, then codex-package-<triple>.tar.gz.
+		// GitHub rust-v<version> is the fallback. Apply flips the standalone current link.
+		fetchDisplay = "curl -fsSL https://releases.openai.com/codex/releases/<version>/codex-package-<triple>.tar.gz"
 		applyDisplay = "swap staged Codex package into place"
+	case "opencode":
+		// opencode.ai's npm channel is 2.x. GitHub latest can still be 1.x.
+		fetchDisplay = "curl -fsSL https://opencode.ai/update/api/latest/cli/npm && npm pack @opencode/cli@<version>"
+		applyDisplay = "swap staged OpenCode package into place"
 	case "claude":
 		// downloads.claude.ai publishes manifest.json (sha256 per platform) and
 		// the binary at <version>/<platform>/claude. Apply drops it in
