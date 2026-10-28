@@ -144,6 +144,11 @@ using that host's install method:
   Homebrew cask          brew upgrade --cask <token>
   Homebrew formula       brew upgrade <token>
 
+The built-in catalog is wider than those three. Each tool uses the channel
+that matches the binary on disk. A tool with no recipe for that channel is
+skipped. Opt-in names (dsh, grok, kilo, kiro-cli) are not searched unless
+the fleet file lists them.
+
 A missing CLI is skipped. clifleet will not brew install, npm install a
 tool that is not already on PATH, or curl an installer. Commands run
 without a TTY (stdin is /dev/null) and with non-interactive brew and npm

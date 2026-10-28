@@ -59,7 +59,13 @@ Two optional per-host controls narrow the search further:
 `--only` narrows again. It cannot add a tool the host policy excluded, so `clifleet upgrade --only dsh` does nothing on a host whose allowlist is `claude` and `codex`.
 
 ```toml
-tools = ["claude", "codex", "opencode"]
+tools = [
+  "claude", "codex", "opencode",
+  "cursor", "agent", "cursor-agent",
+  "gemini", "agy",
+  "copilot", "amp", "pi", "aider", "goose",
+  "openclaw", "hermes", "kimi", "qwen",
+]
 
 [[hosts]]
 name = "us-server"
@@ -73,20 +79,20 @@ ssh = "dev@shanghai.example.com"
 tools = ["claude", "opencode", "dsh"]
 ```
 
-`dsh` is not in the default candidate list. Naming it on `shanghai` means "look for it here." If it is absent, it stays absent. A recipe can say how to upgrade it once it is installed; a recipe still does not install it:
-
-```toml
-[[recipe]]
-name = "dsh"
-native = ["dsh", "update"]
-```
+`dsh` is not in the default candidate list. Naming it on `shanghai` means "look for it here." If it is absent, it stays absent. Opt-in tools already have a built-in upgrade spec, so this host does not need a `[[recipe]]` for an npm install of `@deepseek-ai/dsh`. There is no `dsh update` subcommand. A copy that is not an npm install is skipped until a recipe says how to upgrade that copy. A recipe still does not install it.
 
 ## Example fleet file
 
 `clifleet init` writes `~/.config/clifleet/hosts.toml` (or `$XDG_CONFIG_HOME/clifleet/hosts.toml`):
 
 ```toml
-tools = ["claude", "codex", "opencode"]
+tools = [
+  "claude", "codex", "opencode",
+  "cursor", "agent", "cursor-agent",
+  "gemini", "agy",
+  "copilot", "amp", "pi", "aider", "goose",
+  "openclaw", "hermes", "kimi", "qwen",
+]
 
 concurrency = 8
 timeout = "3m"
@@ -140,7 +146,7 @@ clifleet doctor
 clifleet doctor --offline
 ```
 
-`status` prints one row per host and candidate:
+`status` prints one row per host and candidate. A host with no allowlist has one row for every default name; this sample is only the first few:
 
 ```text
 HOST        TOOL      VERSION    METHOD  STATUS
@@ -171,6 +177,51 @@ clifleet resolves symlinks and reads the path (Homebrew Cellar or Caskroom, `nod
 
 `npm install -g` here is the upgrade for a package that is already installed. It is not used when `command -v` fails. `brew install` and curl installers are not used at all. A cargo install is reported and left alone. A binary with no recipe is skipped with `no upgrade recipe` rather than guessed into an installer.
 
+## Built-in catalog
+
+Three tiers. Only the first is searched on every host.
+
+| Tier | What it is | How it joins a host |
+| --- | --- | --- |
+| Default | Curated worldwide CLIs in `DefaultTools()` | The fleet file's `tools` list, or this set when `tools` is omitted |
+| Opt-in | Built-in upgrade spec, not a default candidate | Name it in `tools` (global or that host's allowlist) |
+| Recipe | No built-in spec | A `[[recipe]]` plus a `tools` entry. The recipe does not add the name by itself |
+
+`cursor`, `agent`, and `cursor-agent` are three PATH names. `cursor` is the editor shell command (it can fail when Cursor.app is absent). `agent` is the Cursor Agent CLI from the official install script (`agent update`). `cursor-agent` is the same agent binary under the name Homebrew's `cursor-cli` cask links, which [aiupdate](https://github.com/narze/aiupdate) updates with `cursor-agent update`. A machine with both symlinks runs that updater once per name.
+
+| Tool | Tier | Already installed as | Command |
+| --- | --- | --- | --- |
+| Claude Code, Codex, OpenCode | default | see the table above | see the table above |
+| `cursor` | default | Homebrew cask | `brew upgrade --cask cursor` |
+| `cursor` | default | editor shim on `PATH` | skipped, no native updater |
+| `agent` | default | install script | `agent update` |
+| `cursor-agent` | default | install script | `cursor-agent update` |
+| `cursor-agent` | default | Homebrew cask `cursor-cli` | `brew upgrade --cask cursor-cli` |
+| `gemini` | default | npm `@google/gemini-cli` | `npm install -g @google/gemini-cli@latest` |
+| `gemini` | default | Homebrew formula `gemini-cli` | `brew upgrade gemini-cli` |
+| `gemini` | default | anything else | skipped. The cheatsheet mentions `gemini update`; the FAQ and command reference do not, so it is not called |
+| `agy` | default | Antigravity CLI | `agy update` |
+| `copilot` | default | native / npm `@github/copilot` / cask `copilot-cli` | `copilot update`, or that package manager |
+| `amp` | default | native, or npm | `amp update`, or `@ampcode/cli` (`@sourcegraph/amp` when that path is on disk) |
+| `pi` | default | native or npm `@earendil-works/pi-coding-agent` | `pi update` (the CLI only, not `pi update --all`) |
+| `aider` | default | pip/uv | `aider --upgrade --yes-always` |
+| `aider` | default | Homebrew formula `aider` | `brew upgrade aider` |
+| `goose` | default | script install | `goose update` |
+| `goose` | default | Homebrew | `brew upgrade block-goose-cli` (not the unrelated `goose` formula; a Cellar token on disk wins) |
+| `openclaw` | default | its own updater | `openclaw update --yes` |
+| `hermes` | default | managed source checkout | `hermes update` |
+| `kimi` | default | native or npm `@moonshot-ai/kimi-code` | `kimi upgrade --yes`, or npm |
+| `qwen` | default | native or npm `@qwen-code/qwen-code` | `qwen update`, or npm |
+| `dsh` | opt-in | npm `@deepseek-ai/dsh` | `npm install -g @deepseek-ai/dsh@latest` |
+| `dsh` | opt-in | anything else | skipped. No `dsh update` subcommand |
+| `grok` | opt-in | native or npm `@xai-official/grok` | `grok update`, or npm |
+| `kilo` | opt-in | native or npm `@kilocode/cli` | `kilo upgrade`, or npm |
+| `kiro-cli` | opt-in | Kiro CLI | `kiro-cli update --non-interactive` |
+
+Left as a user recipe, not a built-in: MiniMax Code (sources disagree on the binary, `mcode` versus `minimax`), and the rest of the [Magpie](https://usemagpie.co/) agent list. [aiupdate](https://github.com/narze/aiupdate) also refreshes skills with `npx skills update`. That is out of scope here.
+
+`hermes update` does not rewrite a Store, Nix, Docker, or Termux APT install. `openclaw update` refuses system-package installs. Those copies are not given a guessed `brew` token.
+
 After a successful command, clifleet probes the version again. An unchanged version is `up to date`, not an error.
 
 ## Exit codes
@@ -193,6 +244,18 @@ Other hosts still run. One failure does not hide the rest of the matrix.
 | API keys, model config | Untouched | Untouched | The product. Gateway on `127.0.0.1:3425` | Often the point |
 
 Use aiupdate or agentup when you are sitting at the one machine you want to update. Use Magpie when you want Claude Code or Codex to call a different model. Use clifleet when the same kind of binary upgrade has to happen on a list of hosts that are not alike.
+
+The default catalog follows those upgrade/status peers where their commands match upstream, and it stops there:
+
+| Peer | What clifleet took from it |
+| --- | --- |
+| [aiupdate](https://github.com/narze/aiupdate) | `claude update`, `codex update`, `opencode upgrade`, `cursor-agent update`, `copilot update`, `pi update` (same self-update as their `pi update pi`), `agy update`. Skills via npx are not a clifleet tool. |
+| [agentup](https://github.com/rockychang7/agentup) | npm and Homebrew tokens for Codex, Claude Code, and OpenCode. Agy's upgrade is the native `agy update` from Antigravity's own docs, which is newer than agentup's "upgrade manually" note. |
+| [agent-cli-updater](https://github.com/Yunz93/CLI-updater) | Gemini CLI, Cursor, Kimi, Qwen Code, Amp, Copilot, Aider, alongside Codex, Claude Code, and OpenCode. |
+| [code-aide](https://github.com/dajobe/code-aide) | `agent` as the Cursor CLI command, plus claude, gemini, opencode, kilo, amp, codex, copilot. |
+| [sync-ai-clis](https://github.com/hyeonbungi/sync-ai-clis) | Update commands for claude, codex, gemini, `kiro-cli`, and agy. That project installs missing tools after consent. clifleet does not. |
+| [CC Switch](https://ccswitch.io/) | Name list only (Claude, Codex, Gemini, Grok, OpenCode, OpenClaw, Hermes, Pi, MiniMax, Kimi, Antigravity, and others). Install hints are not copied. |
+| [Magpie](https://usemagpie.co/) | Long-tail awareness only. Those names stay a user `[[recipe]]`. |
 
 ## Development
 

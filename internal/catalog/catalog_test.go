@@ -20,7 +20,13 @@ func TestCandidatesHeterogeneous(t *testing.T) {
 		t.Fatalf("shanghai %v", sh)
 	}
 	ws := Candidates(global, HostPolicy{Skip: []string{"opencode"}}, nil)
-	if strings.Join(ws, ",") != "claude,codex" {
+	var wantSkip []string
+	for _, name := range global {
+		if name != "opencode" {
+			wantSkip = append(wantSkip, name)
+		}
+	}
+	if strings.Join(ws, ",") != strings.Join(wantSkip, ",") {
 		t.Fatalf("workshop %v", ws)
 	}
 	// skip wins over an allowlist.
@@ -34,8 +40,67 @@ func TestCandidatesHeterogeneous(t *testing.T) {
 	}
 }
 
+func TestDefaultToolsAndOptIn(t *testing.T) {
+	def := map[string]struct{}{}
+	for _, name := range DefaultTools() {
+		def[name] = struct{}{}
+		spec, ok := builtin(name)
+		if !ok || spec.Binary == "" {
+			t.Fatalf("default %s has no spec", name)
+		}
+	}
+	for _, name := range []string{
+		"claude", "codex", "opencode",
+		"cursor", "agent", "cursor-agent",
+		"gemini", "agy",
+		"copilot", "amp", "pi", "aider", "goose",
+		"openclaw", "hermes", "kimi", "qwen",
+	} {
+		if _, ok := def[name]; !ok {
+			t.Fatalf("missing default %s", name)
+		}
+	}
+	for _, name := range []string{"dsh", "grok", "kilo", "kiro-cli"} {
+		if _, ok := def[name]; ok {
+			t.Fatalf("%s must stay opt-in", name)
+		}
+		spec, ok := builtin(name)
+		if !ok || spec.Binary != name {
+			t.Fatalf("opt-in %s spec %+v ok=%v", name, spec, ok)
+		}
+	}
+	if _, ok := builtin("minimax"); ok {
+		t.Fatal("minimax must stay a user recipe; binary name was not verified")
+	}
+	// An unknown name still probes. Upgrade stays a skip until a recipe exists.
+	spec := Resolve("crush", nil)
+	if spec.Binary != "crush" || len(spec.Native) != 0 || spec.Npm != "" {
+		t.Fatalf("unknown spec %+v", spec)
+	}
+	dec := Decide(spec, present("crush", "/usr/local/bin/crush", "/usr/local/bin/crush", "1.0.0"), "")
+	if dec.Command != nil || dec.Skip != "no upgrade recipe" {
+		t.Fatalf("unknown upgrade %+v", dec)
+	}
+}
+
+func TestCursorAndAgentAreDistinct(t *testing.T) {
+	cursor, ok := builtin("cursor")
+	if !ok || cursor.Binary != "cursor" || len(cursor.Native) != 0 || cursor.Brew != "cursor" || cursor.BrewKind != "cask" {
+		t.Fatalf("cursor %+v", cursor)
+	}
+	agent, ok := builtin("agent")
+	if !ok || agent.Binary != "agent" || strings.Join(agent.Native, " ") != "agent update" || agent.Brew != "" {
+		t.Fatalf("agent %+v", agent)
+	}
+	legacy, ok := builtin("cursor-agent")
+	if !ok || legacy.Binary != "cursor-agent" || strings.Join(legacy.Native, " ") != "cursor-agent update" || legacy.Brew != "cursor-cli" {
+		t.Fatalf("cursor-agent %+v", legacy)
+	}
+}
+
 func TestDecideNeverInstallsMissing(t *testing.T) {
-	for _, tool := range []string{"claude", "codex", "opencode", "dsh"} {
+	tools := append(append([]string{}, DefaultTools()...), "dsh", "grok", "kilo", "kiro-cli", "crush")
+	for _, tool := range tools {
 		dec := Decide(Resolve(tool, nil), Observation{Tool: tool, Present: false}, "npm")
 		if dec.Command != nil {
 			t.Fatalf("%s missing produced %v", tool, dec.Command.Argv)
@@ -172,10 +237,218 @@ func TestSelectUpgrade(t *testing.T) {
 			skip: "cargo installs are not upgraded automatically",
 		},
 		{
-			name: "unknown native tool has no recipe",
+			name: "dsh native has no upgrade subcommand",
 			tool: "dsh",
 			obs:  present("dsh", "/usr/local/bin/dsh", "/usr/local/bin/dsh", "0.9.1"),
 			skip: "no upgrade recipe",
+		},
+		{
+			name:   "dsh npm uses the built-in package",
+			tool:   "dsh",
+			obs:    present("dsh", "/usr/local/bin/dsh", "/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js", "0.2.1"),
+			want:   []string{"npm", "install", "-g", "--no-fund", "--no-audit", "@deepseek-ai/dsh@latest"},
+			method: MethodNpm,
+		},
+		{
+			name:   "cursor editor brew cask",
+			tool:   "cursor",
+			obs:    withBrew(present("cursor", "/opt/homebrew/bin/cursor", "/opt/homebrew/Caskroom/cursor/3.0.0/Cursor.app/Contents/Resources/app/bin/cursor", "3.0.0"), "cask", "cursor"),
+			want:   []string{"brew", "upgrade", "--cask", "cursor"},
+			method: MethodBrew,
+		},
+		{
+			name: "cursor editor shim has no native updater",
+			tool: "cursor",
+			obs:  present("cursor", "/usr/local/bin/cursor", "/Applications/Cursor.app/Contents/Resources/app/bin/cursor", "3.0.0"),
+			skip: "no upgrade recipe",
+		},
+		{
+			name:   "agent native",
+			tool:   "agent",
+			obs:    present("agent", "/home/a/.local/bin/agent", "/home/a/.local/share/cursor-agent/versions/2026.10.22/cursor-agent", "2026.10.22"),
+			want:   []string{"agent", "update"},
+			method: MethodNative,
+		},
+		{
+			name:   "cursor-agent native",
+			tool:   "cursor-agent",
+			obs:    present("cursor-agent", "/home/a/.local/bin/cursor-agent", "/home/a/.local/share/cursor-agent/versions/2026.10.22/cursor-agent", "2026.10.22"),
+			want:   []string{"cursor-agent", "update"},
+			method: MethodNative,
+		},
+		{
+			name:   "cursor-agent brew cask",
+			tool:   "cursor-agent",
+			obs:    withBrew(present("cursor-agent", "/opt/homebrew/bin/cursor-agent", "/opt/homebrew/Caskroom/cursor-cli/2026.10.22/dist-package/cursor-agent", "2026.10.22"), "cask", "cursor-cli"),
+			want:   []string{"brew", "upgrade", "--cask", "cursor-cli"},
+			method: MethodBrew,
+		},
+		{
+			name:   "gemini npm",
+			tool:   "gemini",
+			obs:    present("gemini", "/usr/local/bin/gemini", "/usr/local/lib/node_modules/@google/gemini-cli/bundle/gemini.js", "0.29.2"),
+			want:   []string{"npm", "install", "-g", "--no-fund", "--no-audit", "@google/gemini-cli@latest"},
+			method: MethodNpm,
+		},
+		{
+			name:   "gemini brew formula",
+			tool:   "gemini",
+			obs:    withBrew(present("gemini", "/opt/homebrew/bin/gemini", "/opt/homebrew/Cellar/gemini-cli/0.29.2/bin/gemini", "0.29.2"), "formula", "gemini-cli"),
+			want:   []string{"brew", "upgrade", "gemini-cli"},
+			method: MethodBrew,
+		},
+		{
+			name: "gemini native has no self-update",
+			tool: "gemini",
+			obs:  present("gemini", "/home/a/.local/bin/gemini", "/home/a/.local/bin/gemini", "0.29.2"),
+			skip: "no upgrade recipe",
+		},
+		{
+			name:   "agy native",
+			tool:   "agy",
+			obs:    present("agy", "/home/a/.local/bin/agy", "/home/a/.local/bin/agy", "1.4.9"),
+			want:   []string{"agy", "update"},
+			method: MethodNative,
+		},
+		{
+			name:   "copilot native",
+			tool:   "copilot",
+			obs:    present("copilot", "/home/a/.local/bin/copilot", "/home/a/.local/bin/copilot", "1.0.105"),
+			want:   []string{"copilot", "update"},
+			method: MethodNative,
+		},
+		{
+			name:   "copilot npm",
+			tool:   "copilot",
+			obs:    present("copilot", "/usr/local/bin/copilot", "/usr/local/lib/node_modules/@github/copilot/bin/copilot", "1.0.105"),
+			want:   []string{"npm", "install", "-g", "--no-fund", "--no-audit", "@github/copilot@latest"},
+			method: MethodNpm,
+		},
+		{
+			name:   "copilot brew cask",
+			tool:   "copilot",
+			obs:    withBrew(present("copilot", "/opt/homebrew/bin/copilot", "/opt/homebrew/Caskroom/copilot-cli/1.0.105/copilot", "1.0.105"), "cask", "copilot-cli"),
+			want:   []string{"brew", "upgrade", "--cask", "copilot-cli"},
+			method: MethodBrew,
+		},
+		{
+			name:   "amp native",
+			tool:   "amp",
+			obs:    present("amp", "/home/a/.local/bin/amp", "/home/a/.local/bin/amp", "1.0.0"),
+			want:   []string{"amp", "update"},
+			method: MethodNative,
+		},
+		{
+			name:   "amp old npm package from path",
+			tool:   "amp",
+			obs:    present("amp", "/usr/local/bin/amp", "/usr/local/lib/node_modules/@sourcegraph/amp/bin/amp", "0.1.0"),
+			want:   []string{"npm", "install", "-g", "--no-fund", "--no-audit", "@sourcegraph/amp@latest"},
+			method: MethodNpm,
+		},
+		{
+			name:   "pi native updates the cli only",
+			tool:   "pi",
+			obs:    present("pi", "/home/a/.local/bin/pi", "/home/a/.local/bin/pi", "1.4.0"),
+			want:   []string{"pi", "update"},
+			method: MethodNative,
+		},
+		{
+			name:   "pi npm",
+			tool:   "pi",
+			obs:    present("pi", "/usr/local/bin/pi", "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/pi", "1.4.0"),
+			want:   []string{"npm", "install", "-g", "--no-fund", "--no-audit", "@earendil-works/pi-coding-agent@latest"},
+			method: MethodNpm,
+		},
+		{
+			name:   "aider native",
+			tool:   "aider",
+			obs:    present("aider", "/home/a/.local/bin/aider", "/home/a/.local/bin/aider", "0.86.2"),
+			want:   []string{"aider", "--upgrade", "--yes-always"},
+			method: MethodNative,
+		},
+		{
+			name:   "aider brew formula",
+			tool:   "aider",
+			obs:    withBrew(present("aider", "/opt/homebrew/bin/aider", "/opt/homebrew/Cellar/aider/0.86.2/bin/aider", "0.86.2"), "formula", "aider"),
+			want:   []string{"brew", "upgrade", "aider"},
+			method: MethodBrew,
+		},
+		{
+			name:   "goose native",
+			tool:   "goose",
+			obs:    present("goose", "/home/a/.local/bin/goose", "/home/a/.local/bin/goose", "1.56.0"),
+			want:   []string{"goose", "update"},
+			method: MethodNative,
+		},
+		{
+			name:   "goose brew formula is block-goose-cli",
+			tool:   "goose",
+			obs:    withBrew(present("goose", "/opt/homebrew/bin/goose", "/opt/homebrew/Cellar/block-goose-cli/1.56.0/bin/goose", "1.56.0"), "formula", "block-goose-cli"),
+			want:   []string{"brew", "upgrade", "block-goose-cli"},
+			method: MethodBrew,
+		},
+		{
+			name:   "openclaw npm path uses the native updater",
+			tool:   "openclaw",
+			obs:    present("openclaw", "/usr/local/bin/openclaw", "/usr/local/lib/node_modules/openclaw/dist/index.js", "2026.10.1"),
+			want:   []string{"openclaw", "update", "--yes"},
+			method: MethodNative,
+		},
+		{
+			name:   "hermes native",
+			tool:   "hermes",
+			obs:    present("hermes", "/home/a/.local/bin/hermes", "/home/a/.hermes/hermes", "0.16.0"),
+			want:   []string{"hermes", "update"},
+			method: MethodNative,
+		},
+		{
+			name:   "kimi native",
+			tool:   "kimi",
+			obs:    present("kimi", "/home/a/.local/bin/kimi", "/home/a/.local/bin/kimi", "0.43.0"),
+			want:   []string{"kimi", "upgrade", "--yes"},
+			method: MethodNative,
+		},
+		{
+			name:   "kimi npm",
+			tool:   "kimi",
+			obs:    present("kimi", "/usr/local/bin/kimi", "/usr/local/lib/node_modules/@moonshot-ai/kimi-code/bin/kimi", "0.43.0"),
+			want:   []string{"npm", "install", "-g", "--no-fund", "--no-audit", "@moonshot-ai/kimi-code@latest"},
+			method: MethodNpm,
+		},
+		{
+			name:   "qwen native",
+			tool:   "qwen",
+			obs:    present("qwen", "/home/a/.local/bin/qwen", "/home/a/.local/bin/qwen", "0.20.0"),
+			want:   []string{"qwen", "update"},
+			method: MethodNative,
+		},
+		{
+			name:   "qwen npm",
+			tool:   "qwen",
+			obs:    present("qwen", "/usr/local/bin/qwen", "/usr/local/lib/node_modules/@qwen-code/qwen-code/bundle/qwen.js", "0.20.0"),
+			want:   []string{"npm", "install", "-g", "--no-fund", "--no-audit", "@qwen-code/qwen-code@latest"},
+			method: MethodNpm,
+		},
+		{
+			name:   "grok opt-in native",
+			tool:   "grok",
+			obs:    present("grok", "/home/a/.local/bin/grok", "/home/a/.local/bin/grok", "1.0.0"),
+			want:   []string{"grok", "update"},
+			method: MethodNative,
+		},
+		{
+			name:   "kilo opt-in native",
+			tool:   "kilo",
+			obs:    present("kilo", "/home/a/.local/bin/kilo", "/home/a/.local/bin/kilo", "1.0.0"),
+			want:   []string{"kilo", "upgrade"},
+			method: MethodNative,
+		},
+		{
+			name:   "kiro-cli opt-in native",
+			tool:   "kiro-cli",
+			obs:    present("kiro-cli", "/home/a/.local/bin/kiro-cli", "/home/a/.local/bin/kiro-cli", "1.0.0"),
+			want:   []string{"kiro-cli", "update", "--non-interactive"},
+			method: MethodNative,
 		},
 	}
 	for _, tc := range cases {

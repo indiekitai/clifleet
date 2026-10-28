@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/indiekitai/clifleet/internal/catalog"
 )
 
 const (
@@ -77,8 +79,9 @@ var (
 )
 
 // DefaultTools is the candidate set used when the file omits tools.
+// It is the catalog's curated list, not a second copy.
 func DefaultTools() []string {
-	return []string{"claude", "codex", "opencode"}
+	return catalog.DefaultTools()
 }
 
 // DefaultPath is $XDG_CONFIG_HOME/clifleet/hosts.toml or ~/.config/clifleet/hosts.toml.
