@@ -294,7 +294,7 @@ func ParseProbe(stdout string) (map[string]catalog.Observation, error) {
 				BrewToken: fields[7],
 				Package:   fields[8],
 			}
-		case "upgrade":
+		case "upgrade", "fetch", "apply":
 			continue
 		default:
 			return nil, fmt.Errorf("unknown probe tag %q", fields[1])

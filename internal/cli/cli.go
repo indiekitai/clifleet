@@ -48,6 +48,10 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		return cmdFleet(args[1:], stdout, stderr, false)
 	case "upgrade":
 		return cmdFleet(args[1:], stdout, stderr, true)
+	case "fetch":
+		return cmdFleet(append([]string{"--fetch"}, args[1:]...), stdout, stderr, true)
+	case "apply":
+		return cmdFleet(append([]string{"--apply"}, args[1:]...), stdout, stderr, true)
 	case "doctor":
 		return cmdDoctor(args[1:], stdout, stderr)
 	default:
@@ -65,6 +69,8 @@ Commands:
   init       Write an example fleet file
   status     Show host × tool × version × install method
   upgrade    Upgrade CLIs that are already installed
+  fetch      Stage upgrade artifacts (same as upgrade --fetch)
+  apply      Install staged artifacts (same as upgrade --apply)
   doctor     Check SSH, the fleet file, and reachability
   version    Print the clifleet version
 
@@ -77,6 +83,8 @@ Examples:
   clifleet status
   clifleet status --dry-run
   clifleet upgrade --dry-run
+  clifleet upgrade --fetch
+  clifleet upgrade --apply
   clifleet upgrade --only claude --hosts us-server
   clifleet doctor
 
@@ -133,6 +141,8 @@ Examples:
 
 const upgradeHelp = `Usage:
   clifleet upgrade [flags]
+  clifleet fetch [flags]
+  clifleet apply [flags]
 
 On each host, upgrade the candidate CLIs that are already installed,
 using that host's install method:
@@ -158,12 +168,32 @@ upgrade command fails.
 --dry-run still connects, so the printed command matches the install
 method on disk, but it does not run the upgrade.
 
+On a live machine, split the download from the swap so new sessions are
+not opened against a binary that is mid-replace:
+
+  clifleet upgrade --fetch    download into ~/.cache/clifleet (or $XDG_CACHE_HOME/clifleet)
+  clifleet upgrade --apply    install from that cache
+
+clifleet fetch and clifleet apply are the same two steps. --fetch does
+not replace the live binary. npm is staged with npm pack and applied with
+npm install -g of that tarball. Homebrew is staged with brew update and
+brew fetch, then applied with brew upgrade (auto-update off). That apply
+still swaps the keg or cask; the download already happened.
+
+Native self-updaters (claude update, codex update, agent update, and the
+rest) have no stable artifact URL. --fetch marks them no-stage and leaves
+them for a one-shot clifleet upgrade. Bun, pnpm, and yarn global installs
+are no-stage for the same reason. A tool with nothing staged is skipped
+on --apply. --fetch and --apply together are an error.
+
 Flags:
   -c, --config PATH
       --hosts LIST
       --only LIST
       --timeout DURATION
       --parallel N
+      --fetch            Stage artifacts; do not replace binaries
+      --apply            Install from the staged cache
       --dry-run
       --json
   -v, --verbose
@@ -171,9 +201,14 @@ Flags:
 
 Examples:
   clifleet upgrade --dry-run
+  clifleet upgrade --fetch --dry-run
+  clifleet upgrade --fetch --only codex
+  clifleet upgrade --apply
   clifleet upgrade --only claude
   clifleet upgrade --hosts us-server,workshop
 `
+
+const stagedTip = "Tip: on a live machine, clifleet upgrade --fetch then clifleet upgrade --apply downloads first and keeps the binary swap short."
 
 const doctorHelp = `Usage:
   clifleet doctor [flags]
@@ -281,12 +316,16 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 		help = upgradeHelp
 		name = "upgrade"
 	}
-	var dry, jsonOut, verbose bool
+	var dry, jsonOut, verbose, fetch, apply bool
 	opt, fs, err := parseFlags(args, stderr, help, func(fs *flag.FlagSet) {
 		fs.BoolVar(&dry, "dry-run", false, "do not change hosts")
 		fs.BoolVar(&jsonOut, "json", false, "print JSON")
 		fs.BoolVar(&verbose, "verbose", false, "show remote output")
 		fs.BoolVar(&verbose, "v", false, "show remote output")
+		if upgrade {
+			fs.BoolVar(&fetch, "fetch", false, "stage artifacts, do not replace binaries")
+			fs.BoolVar(&apply, "apply", false, "install from the staged cache")
+		}
 	})
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -297,6 +336,17 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 	if fs.NArg() != 0 {
 		fmt.Fprintf(stderr, "clifleet %s: unexpected %s\n", name, strings.Join(fs.Args(), " "))
 		return 1
+	}
+	if fetch && apply {
+		fmt.Fprintf(stderr, "clifleet upgrade: --fetch and --apply are separate steps\n")
+		return 1
+	}
+	phase := fleet.PhaseUpgrade
+	if fetch {
+		phase = fleet.PhaseFetch
+	}
+	if apply {
+		phase = fleet.PhaseApply
 	}
 	cfg, code := loadFleet(opt, stderr)
 	if code != 0 {
@@ -321,7 +371,7 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 	fopt := fleet.Options{
 		Hosts: opt.hosts, Only: opt.only, DryRun: dry,
 		Parallel: parallel, Timeout: timeout, Verbose: verbose,
-		OnProgress: progress,
+		Phase: phase, OnProgress: progress,
 	}
 	var report fleet.Report
 	if upgrade {
@@ -352,6 +402,9 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 		fmt.Fprintln(stdout, table.Render([]string{"HOST", "TOOL", "VERSION", "METHOD", "STATUS"}, lines, colorEnabled(stdout)))
 	}
 	fmt.Fprintln(stdout, report.Summary())
+	if upgrade && phase == fleet.PhaseUpgrade {
+		fmt.Fprintln(stderr, stagedTip)
+	}
 	for _, e := range report.Errors() {
 		fmt.Fprintf(stderr, "%s\n", e)
 	}

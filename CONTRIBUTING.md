@@ -56,10 +56,18 @@ behavior when they think they are in CI. Prefer the upstream updater over a
 guessed `brew` or `npm` token. Do not add an installer (`brew install`, a
 curl script, `npm install` of a binary that is not already on `PATH`).
 
+`upgrade --fetch` then `--apply` downloads into `$XDG_CACHE_HOME/clifleet`
+(or `~/.cache/clifleet`) and only then replaces the binary. npm is
+`npm pack` followed by `npm install -g` of that tarball. Homebrew is
+`brew fetch` followed by `brew upgrade`. Native updaters are `no-stage`:
+do not add a release-page scraper. A staged command is still not an
+installer for a missing binary.
+
 ## Tests that should stay
 
 - Host parsing, allowlists, and blocklists.
 - Upgrade command selection for native, npm, and Homebrew.
-- A missing tool never produces an install command.
+- Fetch/apply plans: npm and Homebrew stage, native updaters are `no-stage`.
+- A missing tool never produces an install command, including under `--fetch`.
 - `--only` cannot widen a host allowlist.
 - `dsh` (and the other opt-in names) stay out of `DefaultTools()`.
