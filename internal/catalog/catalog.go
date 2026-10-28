@@ -69,15 +69,26 @@ type Decision struct {
 }
 
 // DefaultTools are the candidates clifleet looks for unless the fleet file
-// says otherwise. Regional tools are intentionally absent.
+// says otherwise. This is a curated worldwide set, not every agent name a
+// model router knows. Regional CLIs and tools whose binary name moves around
+// stay out; some of those still have a built-in spec so tools=["dsh"] upgrades
+// an install that is already there without a [[recipe]].
 func DefaultTools() []string {
-	return []string{"claude", "codex", "opencode"}
+	return []string{
+		"claude", "codex", "opencode",
+		"cursor", "agent", "cursor-agent",
+		"gemini", "agy",
+		"copilot", "amp", "pi", "aider", "goose",
+		"openclaw", "hermes", "kimi", "qwen",
+	}
 }
 
-// Builtin specs match the upstream install channels as of October 2026.
-// Native updaters: `claude update`, `codex update`, `opencode upgrade`.
+// Builtin specs match upstream install channels as of October 2026.
+// A native argv is set only when that command is the documented updater.
 // Package-manager installs are upgraded with that package manager, because
 // the native updater is the wrong command for a Homebrew cask or an npm global.
+// Fields that are not set are intentional: an unclear channel is a skip
+// ("no upgrade recipe"), not a guessed installer.
 func builtin(name string) (Spec, bool) {
 	switch name {
 	case "claude":
@@ -107,6 +118,177 @@ func builtin(name string) (Spec, bool) {
 			BrewKind: "formula",
 			// npm package is not guessed: v1 is opencode-ai, v2 is @opencode/cli.
 			// The package name has to come from the install on disk.
+		}, true
+	case "cursor":
+		// Editor shell command, distinct from the Cursor Agent CLI (`agent`
+		// and `cursor-agent`). The app shim has no updater of its own; the
+		// app updates itself. Homebrew's cask is `cursor`.
+		return Spec{
+			Name:     "cursor",
+			Binary:   "cursor",
+			Brew:     "cursor",
+			BrewKind: "cask",
+		}, true
+	case "agent":
+		// Cursor Agent CLI. The install script links this name. Official
+		// manual update is `agent update`. Homebrew's cask installs
+		// `cursor-agent` instead, so this spec has no brew token.
+		return Spec{
+			Name:   "agent",
+			Binary: "agent",
+			Native: []string{"agent", "update"},
+		}, true
+	case "cursor-agent":
+		// Same Cursor Agent CLI under the name Homebrew links (cask
+		// `cursor-cli`) and the install script also creates. Not an alias
+		// of the `cursor` editor command.
+		return Spec{
+			Name:     "cursor-agent",
+			Binary:   "cursor-agent",
+			Native:   []string{"cursor-agent", "update"},
+			Brew:     "cursor-cli",
+			BrewKind: "cask",
+		}, true
+	case "gemini":
+		// Google Gemini CLI. FAQ: npm i -g @google/gemini-cli, brew formula
+		// gemini-cli. There is no verified self-update subcommand (the
+		// cheatsheet mentions `gemini update`; the command reference and the
+		// update PRs do not). A native-looking binary is skipped.
+		return Spec{
+			Name:     "gemini",
+			Binary:   "gemini",
+			Npm:      "@google/gemini-cli",
+			Brew:     "gemini-cli",
+			BrewKind: "formula",
+		}, true
+	case "agy":
+		// Google Antigravity CLI. Native installer, `agy update`. No npm
+		// package and no Homebrew formula.
+		return Spec{
+			Name:   "agy",
+			Binary: "agy",
+			Native: []string{"agy", "update"},
+		}, true
+	case "copilot":
+		return Spec{
+			Name:     "copilot",
+			Binary:   "copilot",
+			Native:   []string{"copilot", "update"},
+			Npm:      "@github/copilot",
+			Brew:     "copilot-cli",
+			BrewKind: "cask",
+		}, true
+	case "amp":
+		// Current npm name is @ampcode/cli. @sourcegraph/amp is the old name
+		// and is recognized from the path, not used as the fallback.
+		return Spec{
+			Name:   "amp",
+			Binary: "amp",
+			Native: []string{"amp", "update"},
+			Npm:    "@ampcode/cli",
+		}, true
+	case "pi":
+		// `pi update` updates the CLI only. `pi update pi` is the same
+		// self-update; `pi update --all` also updates extensions, so it is
+		// not used here.
+		return Spec{
+			Name:   "pi",
+			Binary: "pi",
+			Native: []string{"pi", "update"},
+			Npm:    "@earendil-works/pi-coding-agent",
+		}, true
+	case "aider":
+		// PyPI/uv installs take `aider --upgrade`. --yes-always answers the
+		// install prompt so stdin /dev/null does not stall it. Homebrew
+		// formula is `aider` (the Python package name is aider-chat).
+		return Spec{
+			Name:     "aider",
+			Binary:   "aider",
+			Native:   []string{"aider", "--upgrade", "--yes-always"},
+			Brew:     "aider",
+			BrewKind: "formula",
+		}, true
+	case "goose":
+		// Block's goose CLI. `goose update` is the script install's updater.
+		// The Homebrew formula is block-goose-cli. The formula named goose
+		// is a different program that also ships a `goose` binary; when that
+		// one is on disk, the Cellar token is used instead of this fallback.
+		return Spec{
+			Name:     "goose",
+			Binary:   "goose",
+			Native:   []string{"goose", "update"},
+			Brew:     "block-goose-cli",
+			BrewKind: "formula",
+		}, true
+	case "openclaw":
+		// `openclaw update --yes` is the non-interactive updater and picks
+		// the package manager itself (npm needs --allow-scripts=openclaw).
+		// No Npm/Brew fallback, so a brew-classified copy with no token on
+		// disk is skipped rather than pointed at a guessed formula.
+		return Spec{
+			Name:   "openclaw",
+			Binary: "openclaw",
+			Native: []string{"openclaw", "update", "--yes"},
+		}, true
+	case "hermes":
+		// Nous Research Hermes. `hermes update` moves a managed source
+		// checkout to the next stable release. It does not rewrite
+		// package-manager-owned installs (Store, Nix, Docker, Termux APT).
+		return Spec{
+			Name:   "hermes",
+			Binary: "hermes",
+			Native: []string{"hermes", "update"},
+		}, true
+	case "kimi":
+		// Kimi Code. `kimi upgrade --yes` skips the confirmation prompt.
+		// The separate PyPI project kimi-cli is not this binary.
+		return Spec{
+			Name:   "kimi",
+			Binary: "kimi",
+			Native: []string{"kimi", "upgrade", "--yes"},
+			Npm:    "@moonshot-ai/kimi-code",
+		}, true
+	case "qwen":
+		return Spec{
+			Name:   "qwen",
+			Binary: "qwen",
+			Native: []string{"qwen", "update"},
+			Npm:    "@qwen-code/qwen-code",
+		}, true
+
+	// Opt-in. Present in builtin so tools=["name"] upgrades an install
+	// that is already there. Not in DefaultTools.
+	case "dsh":
+		// DeepSeek Harness. Global npm package @deepseek-ai/dsh. The CLI
+		// has no `dsh update` subcommand; a non-npm binary is skipped.
+		return Spec{
+			Name:   "dsh",
+			Binary: "dsh",
+			Npm:    "@deepseek-ai/dsh",
+		}, true
+	case "grok":
+		// xAI Grok Build. Binary is `grok`, not grok-build.
+		return Spec{
+			Name:   "grok",
+			Binary: "grok",
+			Native: []string{"grok", "update"},
+			Npm:    "@xai-official/grok",
+		}, true
+	case "kilo":
+		// Kilo Code. Docs use the `kilo` binary and `kilo upgrade`.
+		return Spec{
+			Name:   "kilo",
+			Binary: "kilo",
+			Native: []string{"kilo", "upgrade"},
+			Npm:    "@kilocode/cli",
+		}, true
+	case "kiro-cli":
+		// AWS Kiro CLI. Self-update is non-interactive with this flag.
+		// No npm package and no Homebrew formula.
+		return Spec{
+			Name:   "kiro-cli",
+			Binary: "kiro-cli",
+			Native: []string{"kiro-cli", "update", "--non-interactive"},
 		}, true
 	default:
 		return Spec{}, false
@@ -345,6 +527,16 @@ func inferPackage(path string) string {
 		"@openai/codex",
 		"@opencode/cli",
 		"opencode-ai",
+		"@google/gemini-cli",
+		"@github/copilot",
+		"@ampcode/cli",
+		"@sourcegraph/amp",
+		"@earendil-works/pi-coding-agent",
+		"@qwen-code/qwen-code",
+		"@moonshot-ai/kimi-code",
+		"@deepseek-ai/dsh",
+		"@xai-official/grok",
+		"@kilocode/cli",
 	}
 	for _, pkg := range known {
 		if strings.Contains(path, pkg) {

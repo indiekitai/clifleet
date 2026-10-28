@@ -27,23 +27,34 @@ CGO_ENABLED=0 go build -o clifleet ./cmd/clifleet
 
 ## Adding a tool
 
-Built-in recipes live in `internal/catalog`. Prefer a user recipe when the
-tool is not one of the defaults. A recipe only describes how to upgrade a
-binary that is already installed:
+Built-in recipes live in `internal/catalog`. There are three tiers:
+
+1. **Default.** `DefaultTools()` and the `tools` list in `internal/config/example.go`. A curated worldwide set. Add a name here only when most makers might already have it and the upgrade command is verified.
+2. **Opt-in.** A `builtin` spec, not in `DefaultTools()`. Use this for regional CLIs (`dsh`) and tools that are real but not part of the default search (`grok`, `kilo`, `kiro-cli`). A host that already has one lists it in `tools`.
+3. **User recipe.** Everything else, including the long tail of model-router catalogs. A recipe only describes how to upgrade a binary that is already installed. It does not add the name to the candidate list:
 
 ```toml
 [[recipe]]
-name = "dsh"
-native = ["dsh", "update"]
+name = "some-tool"
+native = ["some-tool", "update"]
 ```
 
-Do not add regional or vendor-specific tools to the default candidate list
-(`claude", `codex`, `opencode`). Hosts that already have them can name them
-in their own `tools` allowlist.
+Do not add regional or rename-prone tools to the default candidate list.
+Hosts that already have them can name them in their own `tools` allowlist.
+`dsh` is the example: it is opt-in, its npm package is `@deepseek-ai/dsh`,
+and it has no `dsh update` subcommand. Do not invent one.
+
+Leave a channel blank when the upgrade command is unclear. Status can still
+report the binary. Upgrade skips it with `no upgrade recipe`.
+
+`cursor` (editor shim), `agent`, and `cursor-agent` (Cursor Agent CLI) are
+separate tools. Do not collapse them.
 
 Upgrade commands must be non-interactive. The remote script closes stdin and
 exports `NONINTERACTIVE=1`. Do not set `CI=1`; some of these CLIs change
-behavior when they think they are in CI.
+behavior when they think they are in CI. Prefer the upstream updater over a
+guessed `brew` or `npm` token. Do not add an installer (`brew install`, a
+curl script, `npm install` of a binary that is not already on `PATH`).
 
 ## Tests that should stay
 
@@ -51,3 +62,4 @@ behavior when they think they are in CI.
 - Upgrade command selection for native, npm, and Homebrew.
 - A missing tool never produces an install command.
 - `--only` cannot widen a host allowlist.
+- `dsh` (and the other opt-in names) stay out of `DefaultTools()`.

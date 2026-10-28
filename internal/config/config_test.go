@@ -3,6 +3,8 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/indiekitai/clifleet/internal/catalog"
 )
 
 func TestExampleParses(t *testing.T) {
@@ -10,8 +12,11 @@ func TestExampleParses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(cfg.Tools, ",") != "claude,codex,opencode" {
+	if strings.Join(cfg.Tools, ",") != strings.Join(catalog.DefaultTools(), ",") {
 		t.Fatalf("tools = %v", cfg.Tools)
+	}
+	if strings.Join(DefaultTools(), ",") != strings.Join(catalog.DefaultTools(), ",") {
+		t.Fatalf("config defaults drifted from catalog: %v", DefaultTools())
 	}
 	if cfg.Concurrency != 8 || cfg.Timeout.String() != "3m0s" {
 		t.Fatalf("concurrency %d timeout %s", cfg.Concurrency, cfg.Timeout)
@@ -43,6 +48,26 @@ func TestExampleParses(t *testing.T) {
 	for _, name := range cfg.Tools {
 		if name == "dsh" {
 			t.Fatal("dsh must not be a global candidate")
+		}
+	}
+}
+
+func TestOmittedToolsUsesCatalogDefault(t *testing.T) {
+	cfg, err := Parse("hosts.toml", []byte(`
+[[hosts]]
+name = "a"
+local = true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(cfg.Tools, ",") != strings.Join(catalog.DefaultTools(), ",") {
+		t.Fatalf("omitted tools = %v", cfg.Tools)
+	}
+	for _, name := range cfg.Tools {
+		switch name {
+		case "dsh", "grok", "kilo", "kiro-cli":
+			t.Fatalf("%s must not be a default candidate", name)
 		}
 	}
 }
