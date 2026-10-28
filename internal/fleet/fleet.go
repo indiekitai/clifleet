@@ -28,6 +28,7 @@ const (
 	StStaged      = "staged"
 	StNoStage     = "no-stage"
 	StApplied     = "applied"
+	StBlocked     = "blocked"
 )
 
 // StatusBudget is the per-host cap for status when the fleet file does not
@@ -52,6 +53,7 @@ type Options struct {
 	Timeout    time.Duration
 	Verbose    bool
 	Phase      string
+	OneShot    bool
 	OnProgress func(string)
 }
 
@@ -130,7 +132,7 @@ func (r Report) Summary() string {
 		return fmt.Sprintf("dry-run · %d %s · no connections opened", hosts, hostWord)
 	}
 	var installed, missing, upgraded, current, skipped, would, failed int
-	var staged, nostage, applied int
+	var staged, nostage, applied, blocked int
 	seenFail := map[string]bool{}
 	for _, h := range r.Hosts {
 		hostFailed := h.Error != ""
@@ -154,6 +156,8 @@ func (r Report) Summary() string {
 				staged++
 			case StNoStage:
 				nostage++
+			case StBlocked:
+				blocked++
 			}
 			if row.Failed || row.Status == StUnreachable || row.Status == StFailed {
 				hostFailed = true
@@ -165,28 +169,28 @@ func (r Report) Summary() string {
 		}
 	}
 	if r.Phase == PhaseFetch && r.DryRun {
-		return fmt.Sprintf("dry-run · %d %s · %d would stage · %d no-stage · %d skipped · %d failed",
-			hosts, hostWord, would, nostage, skipped+missing, failed)
+		return fmt.Sprintf("dry-run · %d %s · %d would stage · %d blocked · %d no-stage · %d skipped · %d failed",
+			hosts, hostWord, would, blocked, nostage, skipped+missing, failed)
 	}
 	if r.Phase == PhaseFetch {
-		return fmt.Sprintf("%d %s · %d staged · %d no-stage · %d skipped · %d failed",
-			hosts, hostWord, staged, nostage, skipped+missing, failed)
+		return fmt.Sprintf("%d %s · %d staged · %d blocked · %d no-stage · %d skipped · %d failed",
+			hosts, hostWord, staged, blocked, nostage, skipped+missing, failed)
 	}
 	if r.Phase == PhaseApply && r.DryRun {
-		return fmt.Sprintf("dry-run · %d %s · %d would apply · %d no-stage · %d skipped · %d failed",
-			hosts, hostWord, would, nostage, skipped+missing, failed)
+		return fmt.Sprintf("dry-run · %d %s · %d would apply · %d blocked · %d no-stage · %d skipped · %d failed",
+			hosts, hostWord, would, blocked, nostage, skipped+missing, failed)
 	}
 	if r.Phase == PhaseApply {
-		return fmt.Sprintf("%d %s · %d applied · %d up to date · %d no-stage · %d skipped · %d failed",
-			hosts, hostWord, applied, current, nostage, skipped+missing, failed)
+		return fmt.Sprintf("%d %s · %d applied · %d up to date · %d blocked · %d no-stage · %d skipped · %d failed",
+			hosts, hostWord, applied, current, blocked, nostage, skipped+missing, failed)
 	}
 	if r.Command == "upgrade" && r.DryRun {
-		return fmt.Sprintf("dry-run · %d %s · %d would upgrade · %d skipped · %d failed",
-			hosts, hostWord, would, skipped+missing, failed)
+		return fmt.Sprintf("dry-run · %d %s · %d would upgrade · %d no-stage · %d blocked · %d skipped · %d failed",
+			hosts, hostWord, would, nostage, blocked, skipped+missing, failed)
 	}
 	if r.Command == "upgrade" {
-		return fmt.Sprintf("%d %s · %d upgraded · %d up to date · %d skipped · %d failed",
-			hosts, hostWord, upgraded, current, skipped+missing, failed)
+		return fmt.Sprintf("%d %s · %d upgraded · %d up to date · %d no-stage · %d blocked · %d skipped · %d failed",
+			hosts, hostWord, upgraded+applied, current, nostage, blocked, skipped+missing, failed)
 	}
 	return fmt.Sprintf("%d %s · %d installed · %d not installed · %d failed",
 		hosts, hostWord, installed, missing, failed)
@@ -329,6 +333,8 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 	if upgrade {
 		phase = opt.phase()
 	}
+	// The default upgrade downloads, then swaps. --one-shot is the in-place path.
+	safe := phase == PhaseUpgrade && upgrade && !opt.OneShot
 	plans := make([]plan, len(names))
 	var steps []probe.Step
 	var staged []probe.StageStep
@@ -341,24 +347,28 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 		override := host.Methods[name]
 		dec := catalog.Decide(specs[i], o, override)
 		p := plan{spec: specs[i], obs: o, dec: dec}
-		if phase != PhaseUpgrade {
+		if phase != PhaseUpgrade || safe {
 			p.stage = catalog.PlanStage(specs[i], o, override)
 			if p.stage.Action == catalog.ActionStage {
 				staged = append(staged, probe.StageStep{
 					Tool: name, Kind: p.stage.Kind, Package: p.stage.Package,
 					BrewKind: p.stage.BrewKind, BrewToken: p.stage.BrewToken,
+					Release: p.stage.Release,
 				})
 			}
 		}
 		plans[i] = p
 		// Only an installed tool with a concrete command is eligible.
 		// Decide returns a nil command when the binary is missing.
-		if phase == PhaseUpgrade && o.Present && dec.Command != nil && dec.Fail == "" {
+		if phase == PhaseUpgrade && !safe && o.Present && dec.Command != nil && dec.Fail == "" {
 			steps = append(steps, probe.Step{Tool: name, Cmd: *dec.Command})
 		}
 	}
 	if phase == PhaseFetch || phase == PhaseApply {
 		return finishStage(ctx, result, target, run, opt, phase, names, plans, staged, tools, host.PathExtra)
+	}
+	if safe {
+		return finishSafe(ctx, result, target, run, opt, names, plans, staged, tools, host.PathExtra)
 	}
 
 	var exits map[string]int
@@ -582,7 +592,7 @@ func (r Report) Lines() [][]string {
 				if row.Detail != "" {
 					status = "dry-run: " + row.Detail
 				}
-			case StSkipped, StFailed, StNoStage, StStaged, StApplied, StUnreachable:
+			case StSkipped, StFailed, StNoStage, StStaged, StApplied, StUnreachable, StBlocked:
 				if row.Detail != "" {
 					status = row.Status + " (" + row.Detail + ")"
 				}

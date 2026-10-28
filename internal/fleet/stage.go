@@ -14,31 +14,10 @@ func finishStage(ctx context.Context, result HostResult, target runner.Target, r
 	var actions map[string]probe.ActionResult
 	var after map[string]catalog.Observation
 	if !opt.DryRun && len(staged) > 0 {
-		script, err := stageScript(phase, tools, extra, staged)
-		if err != nil {
-			progress(opt, "✗ %s  %s", result.Name, err.Error())
-			return hostErrorResult(result, err.Error())
-		}
-		out, stderr, err := run.Run(ctx, target, script)
-		if err != nil {
-			progress(opt, "✗ %s  %s", result.Name, err.Error())
-			failed := hostErrorResult(result, err.Error())
-			for i, name := range names {
-				failed.Rows = append(failed.Rows, failedRow(name, plans[i], err.Error()))
-			}
-			return failed
-		}
-		actions, after, err = parseStage(phase, out)
-		if err != nil {
-			progress(opt, "✗ %s  %s", result.Name, err.Error())
-			failed := hostErrorResult(result, err.Error())
-			for _, name := range names {
-				failed.Rows = append(failed.Rows, Row{Tool: name, Status: StFailed, Detail: err.Error(), Failed: true})
-			}
-			return failed
-		}
+		var log string
+		actions, after, log = runStageSteps(ctx, target, run, opt, phase, tools, extra, staged)
 		if opt.Verbose {
-			result.Log = strings.TrimSpace(stderr)
+			result.Log = strings.TrimSpace(log)
 		}
 	}
 
@@ -51,6 +30,136 @@ func finishStage(ctx context.Context, result HostResult, target runner.Target, r
 		progress(opt, "✓ %s", result.Name)
 	}
 	return result
+}
+
+// finishSafe is the default upgrade: fetch every stageable tool, then apply
+// the ones that staged. Each tool is its own process and its own timeout, so
+// one slow or failed fetch cannot mark its siblings failed.
+func finishSafe(ctx context.Context, result HostResult, target runner.Target, run runner.Runner, opt Options, names []string, plans []plan, staged []probe.StageStep, tools []probe.Tool, extra []string) HostResult {
+	var fetched, applied map[string]probe.ActionResult
+	var after map[string]catalog.Observation
+	if !opt.DryRun && len(staged) > 0 {
+		var fetchLog, applyLog string
+		fetched, _, fetchLog = runStageSteps(ctx, target, run, opt, PhaseFetch, tools, extra, staged)
+		var applySteps []probe.StageStep
+		for _, step := range staged {
+			res, ok := fetched[step.Tool]
+			if !ok || res.Blocked != "" || res.Exit != 0 || res.Skip != "" {
+				continue
+			}
+			applySteps = append(applySteps, step)
+		}
+		if len(applySteps) > 0 {
+			applied, after, applyLog = runStageSteps(ctx, target, run, opt, PhaseApply, tools, extra, applySteps)
+		}
+		if opt.Verbose {
+			result.Log = strings.TrimSpace(fetchLog + "\n" + applyLog)
+		}
+	}
+	for i, name := range names {
+		result.Rows = append(result.Rows, renderSafeRow(name, plans[i], opt.DryRun, fetched, applied, after))
+	}
+	if hostBad(result) {
+		progress(opt, "✗ %s", result.Name)
+	} else {
+		progress(opt, "✓ %s", result.Name)
+	}
+	return result
+}
+
+// runStageSteps runs one fetch or apply script per tool. A timeout or a
+// non-zero status stays on that tool.
+func runStageSteps(ctx context.Context, target runner.Target, run runner.Runner, opt Options, phase string, tools []probe.Tool, extra []string, steps []probe.StageStep) (map[string]probe.ActionResult, map[string]catalog.Observation, string) {
+	actions := map[string]probe.ActionResult{}
+	after := map[string]catalog.Observation{}
+	var logs []string
+	for _, step := range steps {
+		if ctx.Err() != nil {
+			actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: ctx.Err().Error()}
+			continue
+		}
+		reprobe := reprobeFor(tools, step)
+		script, err := stageScript(phase, reprobe, extra, []probe.StageStep{step})
+		if err != nil {
+			actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: err.Error()}
+			continue
+		}
+		out, stderr, err := run.Run(ctx, target, script)
+		if strings.TrimSpace(stderr) != "" {
+			logs = append(logs, stderr)
+		}
+		if err != nil {
+			actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: err.Error()}
+			continue
+		}
+		got, probed, err := parseStage(phase, out)
+		if err != nil {
+			actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: err.Error()}
+			continue
+		}
+		res, ok := got[step.Tool]
+		if !ok {
+			actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: phase + " did not report a result"}
+		} else {
+			actions[step.Tool] = res
+		}
+		for k, v := range probed {
+			after[k] = v
+		}
+	}
+	return actions, after, strings.Join(logs, "\n")
+}
+
+func reprobeFor(tools []probe.Tool, step probe.StageStep) []probe.Tool {
+	for _, t := range tools {
+		if t.Name == step.Tool {
+			return []probe.Tool{t}
+		}
+	}
+	if step.Tool != "" {
+		return []probe.Tool{{Name: step.Tool, Binary: step.Tool}}
+	}
+	return tools
+}
+
+func renderSafeRow(name string, p plan, dry bool, fetched, applied map[string]probe.ActionResult, after map[string]catalog.Observation) Row {
+	if p.stage.Action != catalog.ActionStage {
+		return renderStageRow(name, p, PhaseFetch, dry, nil, nil)
+	}
+	if dry {
+		row := presentRow(name, p, StDryRun, "", false)
+		row.Method = p.stage.Method
+		fetchDisp, applyDisp := "", ""
+		if p.stage.Fetch != nil {
+			fetchDisp = p.stage.Fetch.Display
+		}
+		if p.stage.Apply != nil {
+			applyDisp = p.stage.Apply.Display
+		}
+		row.Detail = fetchDisp + " → " + applyDisp
+		row.Command = row.Detail
+		return row
+	}
+	fr, ok := fetched[name]
+	if !ok {
+		return presentRow(name, p, StFailed, "fetch did not report a result", true)
+	}
+	if fr.Blocked != "" {
+		row := presentRow(name, p, StBlocked, fr.Blocked, false)
+		row.Method = p.stage.Method
+		return row
+	}
+	if fr.Skip != "" {
+		return presentRow(name, p, StSkipped, fr.Skip, false)
+	}
+	if fr.Exit != 0 {
+		detail := fr.Detail
+		if detail == "" {
+			detail = fmt.Sprintf("exit %d", fr.Exit)
+		}
+		return presentRow(name, p, StFailed, detail, true)
+	}
+	return renderStageRow(name, p, PhaseApply, false, applied, after)
 }
 
 func stageScript(phase string, tools []probe.Tool, extra []string, staged []probe.StageStep) (string, error) {
@@ -134,6 +243,11 @@ func renderStageRow(name string, p plan, phase string, dry bool, actions map[str
 		row.Status = StFailed
 		row.Detail = phase + " did not report a result"
 		row.Failed = true
+		return row
+	}
+	if res.Blocked != "" {
+		row.Status = StBlocked
+		row.Detail = res.Blocked
 		return row
 	}
 	if res.Skip != "" {

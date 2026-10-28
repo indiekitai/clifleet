@@ -22,7 +22,7 @@ func TestPlanStageNpmAndBrew(t *testing.T) {
 	if !strings.Contains(codex.Fetch.Display, CacheDisplayRoot+"/npm/codex") {
 		t.Fatalf("fetch cache %q", codex.Fetch.Display)
 	}
-	if !strings.Contains(codex.Apply.Display, "npm install -g --no-fund --no-audit") || !strings.Contains(codex.Apply.Display, "<staged>.tgz") {
+	if !strings.Contains(codex.Apply.Display, "npm install -g") || !strings.Contains(codex.Apply.Display, "--prefix") || !strings.Contains(codex.Apply.Display, "--no-fund --no-audit") || !strings.Contains(codex.Apply.Display, "<staged>.tgz") || !strings.Contains(codex.Apply.Display, "swap the package directory") {
 		t.Fatalf("apply display %q", codex.Apply.Display)
 	}
 	if strings.Contains(codex.Apply.Display, "@latest") || strings.Contains(codex.Apply.Display, "npm pack") {
@@ -62,12 +62,18 @@ func TestPlanStageNpmAndBrew(t *testing.T) {
 
 func TestPlanStageNoStageAndSkips(t *testing.T) {
 	native := PlanStage(Resolve("codex", nil), present("codex", "/home/a/.local/bin/codex", "/home/a/.codex/packages/standalone/current/codex", "0.163.0"), "")
-	if native.Action != ActionNoStage || native.Reason != ReasonNoStageNative || native.Fetch != nil || native.Apply != nil {
-		t.Fatalf("native %+v", native)
+	if native.Action != ActionStage || native.Kind != KindRelease || native.Release != "codex" || native.Fetch == nil || native.Apply == nil {
+		t.Fatalf("native codex %+v", native)
+	}
+	if !strings.Contains(native.Fetch.Display, "github.com/openai/codex/releases/latest/download/codex-package-") {
+		t.Fatalf("codex fetch %q", native.Fetch.Display)
 	}
 	claude := PlanStage(Resolve("claude", nil), present("claude", "/home/a/.local/bin/claude", "/home/a/.local/bin/claude", "2.1.44"), "")
-	if claude.Action != ActionNoStage || claude.Method != MethodNative {
+	if claude.Action != ActionStage || claude.Kind != KindRelease || claude.Release != "claude" {
 		t.Fatalf("claude native %+v", claude)
+	}
+	if !strings.Contains(claude.Fetch.Display, "github.com/anthropics/claude-code/releases/latest/download/claude-") {
+		t.Fatalf("claude fetch %q", claude.Fetch.Display)
 	}
 	agent := PlanStage(Resolve("agent", nil), present("agent", "/home/a/.local/bin/agent", "/home/a/.local/bin/agent", "2026.10.22"), "")
 	if agent.Action != ActionNoStage {
@@ -158,8 +164,8 @@ func TestPlanStageRespectsMethodOverride(t *testing.T) {
 		present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "0.1.0"),
 		"@openai/codex",
 	), "native")
-	if back.Action != ActionNoStage || back.Method != MethodNative {
-		t.Fatalf("override native %+v", back)
+	if back.Action != ActionStage || back.Kind != KindRelease || back.Release != "codex" {
+		t.Fatalf("override native should stage the Codex release %+v", back)
 	}
 }
 

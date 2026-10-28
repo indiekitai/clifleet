@@ -40,14 +40,13 @@ clifleet init
 clifleet doctor
 clifleet status
 clifleet upgrade --dry-run
-clifleet upgrade --only claude
-clifleet upgrade --fetch
-clifleet upgrade --apply
+clifleet upgrade
+clifleet upgrade --one-shot --only agent
 ```
 
 `clifleet status --dry-run` prints the probe plan and does not connect. `clifleet upgrade --dry-run` does connect, so the command matches the install method on disk, and then it stops before changing anything.
 
-On a machine where people open new terminals while an upgrade runs, use the two-phase flow below. `clifleet upgrade` by itself still does the download and the swap in one session.
+`clifleet upgrade` downloads first and then swaps. The download and the swap are separate steps, one tool at a time, so a terminal opened during the download still sees the old binary. `--fetch` and `--apply` run those two steps on their own. `--one-shot` is the in-place updater for tools that cannot be staged.
 
 ## Heterogeneous fleets
 
@@ -128,11 +127,11 @@ Other fields worth knowing:
 | Field | Meaning |
 | --- | --- |
 | `concurrency` | Parallel SSH sessions. Default 8, maximum 64. |
-| `timeout` | Per-host session budget. Default `3m` for upgrade, fetch, and apply. `status` uses **45s** when this field is omitted and you do not pass `--timeout`. Bare numbers are seconds. |
+| `timeout` | Per-host budget for `status` and for `upgrade --one-shot`. For the default upgrade, `--fetch`, and `--apply` it is the budget of **each tool**, so one slow `brew fetch` cannot fail the other tools on that host. Default `3m`. `status` uses **45s** when this field is omitted and you do not pass `--timeout`. Bare numbers are seconds. |
 | `path_extra` | Absolute directories prepended to the remote `PATH`. |
 | `methods` | Force a channel for one installed tool: `brew`, `npm`, `bun`, `pnpm`, `yarn`, or `native`. Ignored when the binary is missing. |
 
-clifleet uses your `ssh` binary, so `ProxyJump`, agent keys, `Include`, and `Match` keep working. It sets `BatchMode=yes` so a password prompt fails fast instead of hanging. It forces no TTY (`-T`, `RequestTTY=no`) so a host config cannot turn `sh -s` into an interactive prompt. It does not turn off `StrictHostKeyChecking`.
+clifleet uses your `ssh` binary, so `ProxyJump`, agent keys, `Include`, and `Match` keep working. It sets `BatchMode=yes` so a password prompt fails fast instead of hanging. It forces no TTY (`-T`, `RequestTTY=no`) so a host config cannot turn `sh -s` into an interactive prompt. A non-interactive `sh -s` does not read `.zprofile`, so the remote script puts the usual Homebrew directories on `PATH` itself (`/opt/homebrew/bin`, `/usr/local/bin`, and the Linuxbrew paths) and runs `brew shellenv` when `brew` is there. It does that again after nvm, because nvm sometimes replaces `PATH` and drops Homebrew. It does not turn off `StrictHostKeyChecking`.
 
 `clifleet doctor` only runs `true`. A line like "Connection ... port 22 succeeded" means the SSH session opened. `status` and `upgrade` then run a shell script: PATH setup, optional nvm, and `--version` for each candidate. That script can sit after doctor already returned. clifleet caps nvm at 5s and each `--version` at 3s, with stdin on `/dev/null`, so one stuck CLI cannot burn the whole host budget. Other hosts keep running. If the budget still fires, the row is `unreachable (timed out after ...)` and stderr says whether the probe script started. Narrow a live fleet while you look:
 
@@ -157,6 +156,7 @@ clifleet upgrade
 clifleet upgrade --dry-run
 clifleet upgrade --fetch
 clifleet upgrade --apply
+clifleet upgrade --one-shot --only agent
 clifleet upgrade --only codex --hosts us-server
 
 clifleet doctor
@@ -178,9 +178,11 @@ us-server   codex     0.163.0    native  installed
 
 ## How an upgrade is chosen
 
-clifleet resolves symlinks and reads the path (Homebrew Cellar or Caskroom, `node_modules`, package.json). Then it runs only that channel's upgrade. The command's stdin is `/dev/null`. Homebrew and npm are pointed at non-interactive settings. `CI` is left unset.
+clifleet resolves symlinks and reads the path (Homebrew Cellar or Caskroom, `node_modules`, package.json). Then it uses only that channel. The command's stdin is `/dev/null`. Homebrew and npm are pointed at non-interactive settings. `CI` is left unset.
 
-| Already installed as | Command |
+The table is the in-place command (`clifleet upgrade --one-shot`). The default upgrade stages npm, Homebrew, native Codex, and native Claude Code instead of running that command. See the next section.
+
+| Already installed as | One-shot command |
 | --- | --- |
 | Claude Code, native installer | `claude update` |
 | Claude Code, Homebrew cask | `brew upgrade --cask claude-code` (or `claude-code@latest` when that is the cask on disk) |
@@ -192,29 +194,41 @@ clifleet resolves symlinks and reads the path (Homebrew Cellar or Caskroom, `nod
 | OpenCode, Homebrew | `brew upgrade` of the formula on disk |
 | OpenCode, npm | `npm install -g` of the package on disk (`opencode-ai` or `@opencode/cli`) |
 
-`npm install -g` here is the upgrade for a package that is already installed. It is not used when `command -v` fails. `brew install` and curl installers are not used at all. A cargo install is reported and left alone. A binary with no recipe is skipped with `no upgrade recipe` rather than guessed into an installer.
+`npm install -g` here is the upgrade for a package that is already installed. It is not used when `command -v` fails. `brew install` and curl installers are not used to add a missing CLI. A cargo install is reported and left alone. A binary with no recipe is skipped with `no upgrade recipe` rather than guessed into an installer.
+
+`clifleet upgrade` uses the staged commands below when the install method has one. It does not run `claude update` or `codex update` unless you pass `--one-shot`.
 
 ## Staged upgrades
 
-`codex update` and `npm install -g` replace the live binary while they download. A new terminal opened in that window can fail. Split the slow part from the swap:
+`codex update` and a live `npm install -g` replace the binary while they download. A new terminal opened in that window can fail. The default upgrade keeps those apart: download everything that can be staged, then do the short swap. Each tool is its own process with its own timeout. One slow `brew fetch` fails only that tool.
 
 ```bash
-clifleet upgrade --fetch
-clifleet upgrade --apply
+clifleet upgrade
+clifleet upgrade --fetch    # download only
+clifleet upgrade --apply    # swap only, from the cache fetch wrote
+clifleet upgrade --one-shot # in-place updater, for tools marked no-stage
 ```
 
-`clifleet fetch` and `clifleet apply` are the same two steps. `--hosts`, `--only`, `--timeout`, `--parallel`, `--json`, and `--dry-run` work as they do on `upgrade`. `--dry-run` still connects, prints the command for the install method on disk, and does not run it. `--fetch` and `--apply` together are an error. A one-shot `clifleet upgrade` prints a tip pointing here.
+`clifleet fetch` and `clifleet apply` are the same two steps. `--hosts`, `--only`, `--timeout`, `--parallel`, `--json`, and `--dry-run` work as they do on `upgrade`. `--dry-run` still connects, prints the command for the install method on disk, and does not run it. `--fetch` and `--apply` together are an error.
 
 Fetch writes a cache on each host at `$XDG_CACHE_HOME/clifleet`, or `~/.cache/clifleet` when `XDG_CACHE_HOME` is unset. It does not replace the live binary. Apply reads that cache. A tool with nothing staged is skipped with `nothing staged`.
 
 | Already installed as | Fetch | Apply |
 | --- | --- | --- |
-| npm global | `npm pack <pkg>@latest` into the cache | `npm install -g --no-fund --no-audit <tarball>` |
+| npm global | `npm pack <pkg>@latest` into the cache | no-op when the staged version is already installed; otherwise `npm install -g --prefix <tmp>` and swap the package directory |
 | Homebrew formula or cask | `brew update`, then `brew fetch` into Homebrew's own cache | `brew upgrade` with auto-update off |
+| native Codex | `codex-package-<platform>.tar.gz` from `github.com/openai/codex` releases | atomic replace of the binary, or flip the standalone `current` link when the install is that layout |
+| native Claude Code | `claude-<platform>.tar.gz` from `github.com/anthropics/claude-code` releases | atomic replace of the resolved binary |
 
-Apply is the short command. For npm it installs the tarball already on disk, so the package itself is not downloaded again. npm may still fetch a dependency that is not in the npm cache. For Homebrew, apply still swaps the keg or cask. That swap is the unlink and relink, not the bottle download. If a formula's dependencies were not already cached, brew can download those during the swap. Run apply soon after fetch so the cached bottle still matches the formula.
+Those Codex and Claude URLs are the documented release assets (`releases/latest/download/<asset>`). clifleet does not scrape HTML to find them. An unsupported platform is `blocked`, not a guessed download.
 
-Native self-updaters stay on the one-shot path. `claude update`, `codex update`, `agent update`, `cursor-agent update`, `opencode upgrade`, `copilot update`, `amp update`, `pi update`, `agy update`, `goose update`, `openclaw update`, `hermes update`, `kimi upgrade`, `qwen update`, `grok update`, `kilo upgrade`, `kiro-cli update`, and `aider --upgrade` do not publish a stable artifact URL that clifleet can fetch itself. `--fetch` marks those installs `no-stage` and leaves the binary alone. clifleet does not scrape release pages to fake a staged download. `clifleet upgrade` without `--fetch` still runs the updater in one shot.
+npm apply installs into a temporary prefix first. The live tree is moved aside only after that install has produced a package, and it is moved back if the new package does not run. The previous `codex` stays on `PATH` if the swap fails. Apply does not run `npm install` at all when the staged tarball's version already matches the package on disk, so an up-to-date `@openai/codex` is not renamed out from under `/opt/homebrew/lib/node_modules`.
+
+If the tarball's `engines.node` is not satisfied (OpenClaw's `>=24.22.1 <25 || >=26.12.1` on a Node 22 host, for example), fetch reports `blocked` with the required range and the host's Node version. Apply does not run the preinstall that would fail after the download.
+
+Apply is the short command. For npm the package tarball is already on disk. npm may still fetch a dependency that is not in the npm cache while it fills the temp prefix. For Homebrew, apply still swaps the keg or cask. That swap is the unlink and relink, not the bottle download. If a formula's dependencies were not already cached, brew can download those during the swap. Run apply soon after fetch so the cached bottle still matches the formula.
+
+These native updaters stay `no-stage`. They do not publish a stable artifact URL clifleet can fetch: `agent update`, `cursor-agent update`, `opencode upgrade`, `copilot update`, `amp update`, `pi update`, `agy update`, `goose update`, `openclaw update`, `hermes update`, `kimi upgrade`, `qwen update`, `grok update`, `kilo upgrade`, `kiro-cli update`, and `aider --upgrade`. `clifleet upgrade` leaves them alone and says so. `clifleet upgrade --one-shot` runs the updater in place. That is the path that can make the binary disappear while it downloads.
 
 Bun, pnpm, and yarn global installs are `no-stage` as well. They do not have a pack command as direct as `npm pack`.
 
@@ -234,7 +248,7 @@ Three tiers. Only the first is searched on every host.
 
 | Tool | Tier | Already installed as | Command |
 | --- | --- | --- | --- |
-| Claude Code, Codex, OpenCode | default | see the table above | see the table above |
+| Claude Code, Codex, OpenCode | default | see the table above. Native Codex and Claude Code also stage from the GitHub release asset; `upgrade` fetches that and then swaps | see the table above |
 | `cursor` | default | Homebrew cask | `brew upgrade --cask cursor` |
 | `cursor` | default | editor shim on `PATH` | skipped, no native updater |
 | `agent` | default | install script | `agent update` |
