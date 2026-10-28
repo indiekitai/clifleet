@@ -25,6 +25,22 @@ const (
 	StSkipped     = "skipped"
 	StFailed      = "failed"
 	StDryRun      = "dry-run"
+	StStaged      = "staged"
+	StNoStage     = "no-stage"
+	StApplied     = "applied"
+)
+
+// StatusBudget is the per-host cap for status when the fleet file does not
+// set timeout and the CLI does not pass --timeout. A probe should not sit
+// for the upgrade budget. Upgrade, fetch, and apply keep DefaultTimeout.
+const StatusBudget = 45 * time.Second
+
+// Phases of clifleet upgrade. The default is one shot. Fetch only downloads.
+// Apply replaces binaries from the cache fetch wrote.
+const (
+	PhaseUpgrade = "upgrade"
+	PhaseFetch   = "fetch"
+	PhaseApply   = "apply"
 )
 
 // Options controls one status or upgrade run.
@@ -35,7 +51,17 @@ type Options struct {
 	Parallel   int
 	Timeout    time.Duration
 	Verbose    bool
+	Phase      string
 	OnProgress func(string)
+}
+
+func (o Options) phase() string {
+	switch o.Phase {
+	case PhaseFetch, PhaseApply:
+		return o.Phase
+	default:
+		return PhaseUpgrade
+	}
 }
 
 // Row is one cell of the host × tool matrix.
@@ -65,15 +91,17 @@ type HostResult struct {
 // Report is the whole fleet run.
 type Report struct {
 	Command string       `json:"command"`
+	Phase   string       `json:"phase,omitempty"`
 	DryRun  bool         `json:"dry_run"`
 	OK      bool         `json:"ok"`
 	Hosts   []HostResult `json:"hosts"`
 }
 
 type plan struct {
-	spec catalog.Spec
-	obs  catalog.Observation
-	dec  catalog.Decision
+	spec  catalog.Spec
+	obs   catalog.Observation
+	dec   catalog.Decision
+	stage catalog.StagePlan
 }
 
 // Failed is true when any host could not be contacted or an upgrade command failed.
@@ -102,6 +130,7 @@ func (r Report) Summary() string {
 		return fmt.Sprintf("dry-run · %d %s · no connections opened", hosts, hostWord)
 	}
 	var installed, missing, upgraded, current, skipped, would, failed int
+	var staged, nostage, applied int
 	seenFail := map[string]bool{}
 	for _, h := range r.Hosts {
 		hostFailed := h.Error != ""
@@ -113,12 +142,18 @@ func (r Report) Summary() string {
 				missing++
 			case StUpgraded:
 				upgraded++
+			case StApplied:
+				applied++
 			case StCurrent:
 				current++
 			case StSkipped:
 				skipped++
 			case StDryRun:
 				would++
+			case StStaged:
+				staged++
+			case StNoStage:
+				nostage++
 			}
 			if row.Failed || row.Status == StUnreachable || row.Status == StFailed {
 				hostFailed = true
@@ -128,6 +163,22 @@ func (r Report) Summary() string {
 			seenFail[h.Name] = true
 			failed++
 		}
+	}
+	if r.Phase == PhaseFetch && r.DryRun {
+		return fmt.Sprintf("dry-run · %d %s · %d would stage · %d no-stage · %d skipped · %d failed",
+			hosts, hostWord, would, nostage, skipped+missing, failed)
+	}
+	if r.Phase == PhaseFetch {
+		return fmt.Sprintf("%d %s · %d staged · %d no-stage · %d skipped · %d failed",
+			hosts, hostWord, staged, nostage, skipped+missing, failed)
+	}
+	if r.Phase == PhaseApply && r.DryRun {
+		return fmt.Sprintf("dry-run · %d %s · %d would apply · %d no-stage · %d skipped · %d failed",
+			hosts, hostWord, would, nostage, skipped+missing, failed)
+	}
+	if r.Phase == PhaseApply {
+		return fmt.Sprintf("%d %s · %d applied · %d up to date · %d no-stage · %d skipped · %d failed",
+			hosts, hostWord, applied, current, nostage, skipped+missing, failed)
 	}
 	if r.Command == "upgrade" && r.DryRun {
 		return fmt.Sprintf("dry-run · %d %s · %d would upgrade · %d skipped · %d failed",
@@ -175,6 +226,8 @@ func runFleet(ctx context.Context, cfg config.Loaded, opt Options, run runner.Ru
 	timeout := cfg.Timeout
 	if opt.Timeout > 0 {
 		timeout = opt.Timeout
+	} else if !upgrade && !cfg.TimeoutExplicit && timeout > StatusBudget {
+		timeout = StatusBudget
 	}
 
 	command := "status"
@@ -182,6 +235,9 @@ func runFleet(ctx context.Context, cfg config.Loaded, opt Options, run runner.Ru
 		command = "upgrade"
 	}
 	report := Report{Command: command, DryRun: opt.DryRun, Hosts: make([]HostResult, len(hosts))}
+	if upgrade && opt.phase() != PhaseUpgrade {
+		report.Phase = opt.phase()
+	}
 	overlays := overlaysFrom(cfg)
 
 	sem := make(chan struct{}, parallel)
@@ -240,7 +296,11 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 		tools[i] = probe.Tool{Name: specs[i].Name, Binary: specs[i].Binary}
 	}
 
-	progress(opt, "→ %s", host.Name)
+	if timeout > 0 {
+		progress(opt, "→ %s (%s)", host.Name, timeout.Round(time.Second))
+	} else {
+		progress(opt, "→ %s", host.Name)
+	}
 	script, err := probe.ProbeScript(tools, host.PathExtra)
 	if err != nil {
 		progress(opt, "✗ %s  %s", host.Name, err.Error())
@@ -265,8 +325,13 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 		return unreachable(host, names, msg)
 	}
 
+	phase := PhaseUpgrade
+	if upgrade {
+		phase = opt.phase()
+	}
 	plans := make([]plan, len(names))
 	var steps []probe.Step
+	var staged []probe.StageStep
 	for i, name := range names {
 		o, ok := obs[name]
 		if !ok {
@@ -275,12 +340,25 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 		}
 		override := host.Methods[name]
 		dec := catalog.Decide(specs[i], o, override)
-		plans[i] = plan{spec: specs[i], obs: o, dec: dec}
+		p := plan{spec: specs[i], obs: o, dec: dec}
+		if phase != PhaseUpgrade {
+			p.stage = catalog.PlanStage(specs[i], o, override)
+			if p.stage.Action == catalog.ActionStage {
+				staged = append(staged, probe.StageStep{
+					Tool: name, Kind: p.stage.Kind, Package: p.stage.Package,
+					BrewKind: p.stage.BrewKind, BrewToken: p.stage.BrewToken,
+				})
+			}
+		}
+		plans[i] = p
 		// Only an installed tool with a concrete command is eligible.
 		// Decide returns a nil command when the binary is missing.
-		if o.Present && dec.Command != nil && dec.Fail == "" {
+		if phase == PhaseUpgrade && o.Present && dec.Command != nil && dec.Fail == "" {
 			steps = append(steps, probe.Step{Tool: name, Cmd: *dec.Command})
 		}
+	}
+	if phase == PhaseFetch || phase == PhaseApply {
+		return finishStage(ctx, result, target, run, opt, phase, names, plans, staged, tools, host.PathExtra)
 	}
 
 	var exits map[string]int
@@ -382,24 +460,32 @@ func renderRow(name string, p plan, upgrade, dry bool, exits map[string]int, aft
 		return row
 	}
 	before := row.Version
-	if next, ok := after[name]; ok && next.Present {
-		afterV := probe.ShortVersion(next.Version)
-		if afterV == "" {
-			afterV = "unknown"
-		}
-		row.VersionRaw = next.Version
-		if next.Path != "" {
-			row.Path = next.Path
-		}
-		if afterV == before {
-			row.Status = StCurrent
-			return row
-		}
-		row.Status = StUpgraded
-		row.Version = before + " → " + afterV
-		return row
+	if next, ok := after[name]; ok {
+		return noteVersion(row, before, next, StUpgraded)
 	}
 	row.Status = StUpgraded
+	return row
+}
+
+func noteVersion(row Row, before string, next catalog.Observation, changed string) Row {
+	if !next.Present {
+		row.Status = changed
+		return row
+	}
+	afterV := probe.ShortVersion(next.Version)
+	if afterV == "" {
+		afterV = "unknown"
+	}
+	row.VersionRaw = next.Version
+	if next.Path != "" {
+		row.Path = next.Path
+	}
+	if afterV == before {
+		row.Status = StCurrent
+		return row
+	}
+	row.Status = changed
+	row.Version = before + " → " + afterV
 	return row
 }
 
@@ -429,8 +515,12 @@ func failedRow(name string, p plan, detail string) Row {
 
 func unreachable(h config.Host, names []string, msg string) HostResult {
 	out := hostError(h, msg)
+	short := firstLine(msg)
+	if len(short) > 100 {
+		short = short[:100] + "…"
+	}
 	for _, name := range names {
-		out.Rows = append(out.Rows, Row{Tool: name, Status: StUnreachable, Failed: true})
+		out.Rows = append(out.Rows, Row{Tool: name, Status: StUnreachable, Detail: short, Failed: true})
 	}
 	return out
 }
@@ -492,7 +582,7 @@ func (r Report) Lines() [][]string {
 				if row.Detail != "" {
 					status = "dry-run: " + row.Detail
 				}
-			case StSkipped, StFailed:
+			case StSkipped, StFailed, StNoStage, StStaged, StApplied, StUnreachable:
 				if row.Detail != "" {
 					status = row.Status + " (" + row.Detail + ")"
 				}

@@ -54,10 +54,17 @@ type Observation struct {
 
 // Command is a non-interactive upgrade argv. It is only meaningful when
 // the tool is already installed.
+//
+// Package, BrewToken, and BrewKind are set for package-manager commands so
+// a staged fetch can reuse the same resolved target. They are empty for a
+// native updater.
 type Command struct {
-	Argv    []string
-	Method  string
-	Display string
+	Argv      []string
+	Method    string
+	Display   string
+	Package   string
+	BrewToken string
+	BrewKind  string
 }
 
 // Decision is the per-tool plan. Command is nil when nothing should run.
@@ -486,7 +493,14 @@ func brewCommand(spec Spec, obs Observation) (*Command, error) {
 	default:
 		return nil, fmt.Errorf("unknown brew kind %q", kind)
 	}
-	return &Command{Argv: argv, Method: MethodBrew, Display: shellquote.Display(argv)}, nil
+	storedKind := kind
+	if storedKind == "" {
+		storedKind = "formula"
+	}
+	return &Command{
+		Argv: argv, Method: MethodBrew, Display: shellquote.Display(argv),
+		BrewToken: token, BrewKind: storedKind,
+	}, nil
 }
 
 func npmLike(bin string, prefix []string, spec Spec, obs Observation) (*Command, error) {
@@ -518,7 +532,7 @@ func npmLike(bin string, prefix []string, spec Spec, obs Observation) (*Command,
 	}
 	argv := append(append([]string{}, bin), prefix...)
 	argv = append(argv, pkg+"@latest")
-	return &Command{Argv: argv, Method: bin, Display: shellquote.Display(argv)}, nil
+	return &Command{Argv: argv, Method: bin, Display: shellquote.Display(argv), Package: pkg}, nil
 }
 
 func inferPackage(path string) string {
@@ -554,9 +568,27 @@ var (
 
 func safeToken(s string) bool { return tokenRe.MatchString(s) && !strings.Contains(s, "..") }
 func safePackage(s string) bool {
-	return pkgRe.MatchString(s) && !strings.Contains(s, "..")
+	if !pkgRe.MatchString(s) || strings.Contains(s, "..") {
+		return false
+	}
+	// npm would treat a leading dash as a flag. A name or scope segment
+	// that starts with "-" or "." is not a real package name.
+	name := s
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		name = s[i+1:]
+	}
+	return name != "" && name[0] != '-' && name[0] != '.'
 }
 func safeArg(s string) bool { return argRe.MatchString(s) && !strings.Contains(s, "..") }
+
+// PackageOK reports whether s is safe to splice into an npm pack command.
+func PackageOK(s string) bool { return safePackage(s) }
+
+// BrewTokenOK reports whether s is safe to pass to brew fetch or brew upgrade.
+func BrewTokenOK(s string) bool { return safeToken(s) }
+
+// BrewKindOK reports whether kind is a Homebrew target we know how to stage.
+func BrewKindOK(kind string) bool { return kind == "cask" || kind == "formula" }
 
 func setOf(in []string) map[string]struct{} {
 	if len(in) == 0 {

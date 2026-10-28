@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/indiekitai/clifleet/internal/catalog"
 )
@@ -22,6 +23,12 @@ func TestProbeScriptIsReadOnly(t *testing.T) {
 	}
 	if !strings.Contains(script, "</dev/null") {
 		t.Fatal("version check does not detach stdin")
+	}
+	if strings.Contains(script, `. "$HOME/.nvm/nvm.sh" >/dev/null 2>&1 || true`) {
+		t.Fatal("nvm is sourced on the probe stdin")
+	}
+	if !strings.Contains(script, "cf_cap 3") || !strings.Contains(script, "cf_cap 5") || !strings.Contains(script, "clifleet-script/1") {
+		t.Fatal("probe caps or script marker missing")
 	}
 }
 
@@ -150,6 +157,107 @@ func TestProbeScriptRoundTrip(t *testing.T) {
 	}
 	if obs["claude"].Present {
 		t.Fatal("claude should be missing")
+	}
+}
+
+func TestVersionCapDoesNotBlockTheHost(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(bin, "claude"), "#!/bin/sh\nsleep 30\n")
+	writeExe(t, filepath.Join(bin, "codex"), "#!/bin/sh\nprintf 'codex-cli 0.1.0\\n'\n")
+	script, err := ProbeScript([]Tool{{Name: "claude", Binary: "claude"}, {Name: "codex", Binary: "codex"}}, []string{bin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	cmd := exec.Command("sh", "-s")
+	cmd.Stdin = strings.NewReader(script)
+	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + filepath.Join(root, "home")}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("probe failed: %v\n%s", err, out)
+	}
+	if time.Since(start) > 12*time.Second {
+		t.Fatalf("version cap took %s", time.Since(start))
+	}
+	obs, err := ParseProbe(string(out))
+	if err != nil {
+		t.Fatalf("parse: %v\n%s", err, out)
+	}
+	if !obs["claude"].Present || obs["claude"].Version != "version timed out" {
+		t.Fatalf("claude %+v", obs["claude"])
+	}
+	if !obs["codex"].Present || ShortVersion(obs["codex"].Version) != "0.1.0" {
+		t.Fatalf("codex %+v", obs["codex"])
+	}
+}
+
+func TestNvmCapDoesNotBlockTheHost(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	bin := filepath.Join(root, "bin")
+	nvmBin := filepath.Join(home, "nvmbin")
+	if err := os.MkdirAll(filepath.Join(home, ".nvm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(nvmBin, 0o755); err != nil || os.MkdirAll(bin, 0o755) != nil {
+		t.Fatal(err)
+	}
+	// Healthy nvm only adjusts PATH. The binary is not on the initial PATH.
+	if err := os.WriteFile(filepath.Join(home, ".nvm", "nvm.sh"), []byte("PATH=\""+nvmBin+":$PATH\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(nvmBin, "claude"), "#!/bin/sh\nprintf '2.0.0\\n'\n")
+	script, err := ProbeScript([]Tool{{Name: "claude", Binary: "claude"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-s")
+	cmd.Stdin = strings.NewReader(script)
+	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + home}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("probe failed: %v\n%s", err, out)
+	}
+	obs, err := ParseProbe(string(out))
+	if err != nil {
+		t.Fatalf("parse: %v\n%s", err, out)
+	}
+	if !obs["claude"].Present || ShortVersion(obs["claude"].Version) != "2.0.0" {
+		t.Fatalf("nvm PATH was not applied: %+v\n%s", obs["claude"], out)
+	}
+
+	// A stuck nvm.sh must not consume the session. The CLI on the static PATH still reports.
+	if err := os.WriteFile(filepath.Join(home, ".nvm", "nvm.sh"), []byte("sleep 30\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(bin, "claude"), "#!/bin/sh\nprintf '1.0.0\\n'\n")
+	start := time.Now()
+	cmd = exec.Command("sh", "-s")
+	cmd.Stdin = strings.NewReader(script)
+	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + home}
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stuck nvm: %v\n%s", err, out)
+	}
+	if time.Since(start) > 12*time.Second {
+		t.Fatalf("nvm cap took %s", time.Since(start))
+	}
+	obs, err = ParseProbe(string(out))
+	if err != nil {
+		t.Fatalf("parse: %v\n%s", err, out)
+	}
+	if !obs["claude"].Present || ShortVersion(obs["claude"].Version) != "1.0.0" {
+		t.Fatalf("static PATH claude %+v", obs["claude"])
 	}
 }
 

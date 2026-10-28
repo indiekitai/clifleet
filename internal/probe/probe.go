@@ -45,15 +45,44 @@ prepend /opt/homebrew/bin
 prepend /usr/local/bin
 prepend /home/linuxbrew/.linuxbrew/bin
 
-# nvm is sourced for PATH only. A failure here must not abort the probe.
-if [ -n "${HOME:-}" ] && [ -s "$HOME/.nvm/nvm.sh" ]; then
-  . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1 || true
-fi
+# Printed before any slow work so a timeout can tell "script never started"
+# from "script started and stalled". doctor only runs true, so it can succeed
+# while this script is still sitting in a shell startup or a version check.
+printf '%s\n' 'clifleet-script/1' >&2
 `
 
 const scriptFns = `
-hash -r 2>/dev/null || true
-export PATH
+# cf_cap SECONDS OUTFILE CMD... runs CMD with stdin /dev/null and kills it
+# when SECONDS elapses. A stuck --version or nvm.sh must not burn the whole
+# SSH budget. Exit 124 means the cap fired. Fast commands return immediately.
+cf_cap() {
+  secs=$1
+  outfile=$2
+  shift 2
+  : >"$outfile"
+  flag="$outfile.t"
+  rm -f "$flag"
+  "$@" </dev/null >"$outfile" 2>/dev/null &
+  pid=$!
+  (
+    sleep "$secs"
+    if kill -0 "$pid" 2>/dev/null; then
+      printf '1\n' >"$flag"
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  ) </dev/null >/dev/null 2>&1 &
+  kpid=$!
+  status=0
+  wait "$pid" 2>/dev/null || status=$?
+  kill "$kpid" 2>/dev/null || true
+  wait "$kpid" 2>/dev/null || true
+  if [ -f "$flag" ]; then
+    return 124
+  fi
+  return "$status"
+}
 
 resolve() {
   target=$1
@@ -123,7 +152,17 @@ probe_one() {
   if [ -z "$real" ]; then
     real=$path
   fi
-  ver=$("$path" --version </dev/null 2>/dev/null | head -n 1 || true)
+  verfile=$cf_dir/ver
+  if cf_cap 3 "$verfile" "$path" --version; then
+    ver=$(head -n 1 "$verfile" 2>/dev/null || true)
+  else
+    rc=$?
+    if [ "$rc" -eq 124 ]; then
+      ver="version timed out"
+    else
+      ver=$(head -n 1 "$verfile" 2>/dev/null || true)
+    fi
+  fi
   ver=$(flatten "$ver")
   meta=$(brew_meta "$real")
   if [ -z "$meta" ]; then
@@ -219,8 +258,34 @@ func scriptBody(extraPaths []string) (string, error) {
 		fmt.Fprintf(&b, "prepend %s\n", shellquote.Quote(p))
 	}
 	b.WriteString(scriptFns)
+	b.WriteString(nvmSnippet)
 	return b.String(), nil
 }
+
+// nvmSnippet loads nvm's PATH from a capped child so nvm.sh cannot read this
+// script's stdin (sh -s) and cannot hang the session. The child prints PATH;
+// a slow or stuck nvm is skipped and the static prepends above still apply.
+const nvmSnippet = `
+export PATH
+cf_dir=${TMPDIR:-/tmp}/clifleet.$$
+mkdir -p "$cf_dir" || {
+  printf '%s\n' 'clifleet: cannot create temp dir' >&2
+  exit 1
+}
+trap 'rm -rf "$cf_dir"' EXIT
+trap 'rm -rf "$cf_dir"; exit 143' INT TERM
+if [ -n "${HOME:-}" ] && [ -s "$HOME/.nvm/nvm.sh" ]; then
+  nvm_out=$cf_dir/nvm.path
+  if cf_cap 5 "$nvm_out" sh -c '. "$HOME/.nvm/nvm.sh" >/dev/null 2>&1; printf %s "$PATH"'; then
+    nvm_path=$(cat "$nvm_out" 2>/dev/null || true)
+    if [ -n "$nvm_path" ]; then
+      PATH="$nvm_path"
+    fi
+  fi
+fi
+hash -r 2>/dev/null || true
+export PATH
+`
 
 func writeProbes(b *strings.Builder, tools []Tool) error {
 	if len(tools) == 0 {
@@ -294,7 +359,7 @@ func ParseProbe(stdout string) (map[string]catalog.Observation, error) {
 				BrewToken: fields[7],
 				Package:   fields[8],
 			}
-		case "upgrade":
+		case "upgrade", "fetch", "apply":
 			continue
 		default:
 			return nil, fmt.Errorf("unknown probe tag %q", fields[1])

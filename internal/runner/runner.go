@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -53,11 +54,26 @@ func (Exec) Run(ctx context.Context, target Target, script string) (string, stri
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// A new process group so the timeout kills ssh/sh and the children that
+	// inherited their pipes. Otherwise a stuck `sleep` or CLI keeps Run
+	// blocked until that child exits, and the host looks stuck past the budget.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 200 * time.Millisecond
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if err != nil && !errors.Is(err, syscall.ESRCH) {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
 	err := cmd.Run()
 	out, errOut := stdout.String(), stderr.String()
 	if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		msg := fmt.Sprintf("timed out after %s", target.Timeout)
-		if tail := tail(errOut, 8); tail != "" {
+		msg := timeoutMessage(target, out, errOut)
+		if tail := tail(errOut, 8); tail != "" && !strings.Contains(msg, tail) {
 			msg += ": " + tail
 		}
 		return out, errOut, errors.New(msg)
@@ -83,8 +99,13 @@ func DialArgs(target Target) []string {
 		connect = time.Second
 	}
 	sec := int((connect + time.Second - 1) / time.Second)
+	// -T and RequestTTY=no override a host config that forces a TTY.
+	// With a TTY, `sh -s` can sit at an interactive prompt while doctor’s
+	// `true` still returns, so status looks stuck for the whole budget.
 	args := []string{
+		"-T",
 		"-o", "BatchMode=yes",
+		"-o", "RequestTTY=no",
 		"-o", "ConnectTimeout=" + strconv.Itoa(sec),
 		"-o", "LogLevel=ERROR",
 	}
@@ -100,6 +121,26 @@ func DialArgs(target Target) []string {
 // SSHArgs is the OpenSSH argv for a script on stdin (`sh -s`).
 func SSHArgs(target Target) []string {
 	return append(DialArgs(target), "sh", "-s")
+}
+
+func timeoutMessage(target Target, stdout, stderr string) string {
+	msg := fmt.Sprintf("timed out after %s", target.Timeout.Round(time.Second))
+	script := strings.Contains(stdout, "clifleet-script/1") || strings.Contains(stderr, "clifleet-script/1")
+	proto := strings.Contains(stdout, "clifleet-probe/1") ||
+		strings.Contains(stdout, "clifleet-upgrade/1") ||
+		strings.Contains(stdout, "clifleet-fetch/1") ||
+		strings.Contains(stdout, "clifleet-apply/1")
+	switch {
+	case proto:
+		msg += "; the remote command started but did not finish"
+	case script:
+		msg += "; the probe script started but did not finish"
+	case target.Local:
+		msg += "; no clifleet output"
+	default:
+		msg += "; no clifleet output (SSH accepted the session; the shell did not start the script)"
+	}
+	return msg
 }
 
 func tail(s string, n int) string {

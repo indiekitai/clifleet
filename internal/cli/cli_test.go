@@ -106,6 +106,74 @@ func TestHelpAndVersion(t *testing.T) {
 	}
 }
 
+func TestFetchApplyFlags(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if code := Execute([]string{"upgrade", "--help"}, &out, &errBuf); code != 0 {
+		t.Fatal(code)
+	}
+	help := errBuf.String()
+	for _, want := range []string{"--fetch", "--apply", "no-stage", "npm pack", "--hosts", "--only", "--timeout", "--parallel", "--json", "--dry-run"} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("help missing %q\n%s", want, help)
+		}
+	}
+	errBuf.Reset()
+	if code := Execute([]string{"upgrade", "--fetch", "--apply"}, &out, &errBuf); code != 1 || !strings.Contains(errBuf.String(), "separate steps") {
+		t.Fatalf("both flags %d %s", code, errBuf.String())
+	}
+	errBuf.Reset()
+	if code := Execute([]string{"fetch", "--apply"}, &out, &errBuf); code != 1 || !strings.Contains(errBuf.String(), "separate steps") {
+		t.Fatalf("alias %d %s", code, errBuf.String())
+	}
+
+	path := filepath.Join(t.TempDir(), "hosts.toml")
+	body := "[[hosts]]\nname = \"here\"\nlocal = true\ntools = [\"clifleet-no-such-tool\"]\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--config", path, "--hosts", "here", "--only", "clifleet-no-such-tool", "--timeout", "30s", "--parallel", "1"}
+
+	out.Reset()
+	errBuf.Reset()
+	code := Execute(append([]string{"upgrade", "--dry-run"}, args...), &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("one-shot %d\n%s\n%s", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), stagedTip) {
+		t.Fatalf("missing tip\n%s", errBuf.String())
+	}
+	if !strings.Contains(out.String(), "not installed") {
+		t.Fatalf("one-shot output\n%s", out.String())
+	}
+
+	out.Reset()
+	errBuf.Reset()
+	code = Execute(append([]string{"upgrade", "--fetch", "--dry-run", "--json"}, args...), &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("fetch json %d\n%s\n%s", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), `"phase": "fetch"`) || strings.Contains(errBuf.String(), stagedTip) {
+		t.Fatalf("stdout %s\nstderr %s", out.String(), errBuf.String())
+	}
+
+	out.Reset()
+	errBuf.Reset()
+	code = Execute(append([]string{"fetch", "--dry-run"}, args...), &out, &errBuf)
+	if code != 0 || !strings.Contains(out.String(), "not installed") || !strings.Contains(out.String(), "would stage") {
+		t.Fatalf("fetch alias %d\n%s\n%s", code, out.String(), errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), stagedTip) {
+		t.Fatal("fetch printed the one-shot tip")
+	}
+
+	out.Reset()
+	errBuf.Reset()
+	code = Execute(append([]string{"apply", "--dry-run", "--json"}, args...), &out, &errBuf)
+	if code != 0 || !strings.Contains(out.String(), `"phase": "apply"`) {
+		t.Fatalf("apply %d\n%s\n%s", code, out.String(), errBuf.String())
+	}
+}
+
 func TestMissingConfig(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	code := Execute([]string{"status", "--config", filepath.Join(t.TempDir(), "missing.toml")}, &out, &errBuf)
