@@ -61,6 +61,7 @@ func TestUpgradeSkipsMissingAndFailsClosed(t *testing.T) {
 		Hosts:    []string{"us-server", "shanghai"},
 		Parallel: 2,
 		Timeout:  time.Second,
+		OneShot:  true,
 	}, fake)
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +128,7 @@ func TestUpgradeDryRunDoesNotApply(t *testing.T) {
 	for _, line := range report.Lines() {
 		if line[0] == "us-server" && line[1] == "claude" {
 			found = true
-			if line[3] != "brew" || !strings.Contains(line[4], "brew upgrade --cask claude-code") {
+			if line[3] != "brew" || !strings.Contains(line[4], "brew fetch --cask claude-code") || !strings.Contains(line[4], "brew upgrade --cask claude-code") {
 				t.Fatalf("line %v", line)
 			}
 		}
@@ -174,7 +175,7 @@ tools = ["claude", "codex", "cursor", "opencode"]
 	for _, line := range dry.Lines() {
 		saw[line[1]] = strings.Join(line, " | ")
 	}
-	if !strings.Contains(saw["claude"], "no-stage") || !strings.Contains(saw["claude"], "native updater") {
+	if !strings.Contains(saw["claude"], "dry-run:") || !strings.Contains(saw["claude"], "downloads.claude.ai/claude-code-releases/") {
 		t.Fatalf("claude %s", saw["claude"])
 	}
 	if !strings.Contains(saw["codex"], "dry-run:") || !strings.Contains(saw["codex"], "npm pack") || !strings.Contains(saw["codex"], "@openai/codex@latest") {
@@ -199,6 +200,7 @@ tools = ["claude", "codex", "cursor", "opencode"]
 		probe: map[string]string{"box": probe},
 		fetch: map[string]string{"box": strings.Join([]string{
 			"clifleet-fetch/1",
+			actionLine("fetch", "claude", "0", "/home/a/.cache/clifleet/release/claude/claude.tar.gz"),
 			actionLine("fetch", "codex", "0", "/home/a/.cache/clifleet/npm/codex/openai-codex-9.9.9.tgz"),
 			actionLine("fetch", "opencode", "0", "brew cache (formula opencode)"),
 		}, "\n") + "\n"},
@@ -207,7 +209,7 @@ tools = ["claude", "codex", "cursor", "opencode"]
 	if err != nil || got.Failed() {
 		t.Fatalf("%v %s %v", err, got.Summary(), got.Errors())
 	}
-	if !strings.Contains(got.Summary(), "2 staged") || !strings.Contains(got.Summary(), "1 no-stage") {
+	if !strings.Contains(got.Summary(), "3 staged") || !strings.Contains(got.Summary(), "0 no-stage") {
 		t.Fatal(got.Summary())
 	}
 	joined := strings.Join(fake.Scripts(), "\n---\n")
@@ -217,6 +219,9 @@ tools = ["claude", "codex", "cursor", "opencode"]
 	if strings.Contains(joined, "'claude' 'update'") || strings.Contains(joined, "npm install") || strings.Contains(joined, "stage_npm 'cursor'") {
 		t.Fatalf("fetch touched a live or unstaged tool:\n%s", joined)
 	}
+	if !strings.Contains(joined, "stage_release_claude 'claude'") {
+		t.Fatalf("native claude was not staged:\n%s", joined)
+	}
 	for _, h := range got.Hosts {
 		for _, row := range h.Rows {
 			switch row.Tool {
@@ -225,7 +230,7 @@ tools = ["claude", "codex", "cursor", "opencode"]
 					t.Fatalf("codex %+v", row)
 				}
 			case "claude":
-				if row.Status != StNoStage {
+				if row.Status != StStaged {
 					t.Fatalf("claude %+v", row)
 				}
 			}
@@ -236,12 +241,13 @@ tools = ["claude", "codex", "cursor", "opencode"]
 		probe: map[string]string{"box": probe},
 		apply: map[string]string{"box": strings.Join([]string{
 			"clifleet-apply/1",
+			actionLine("apply", "claude", "0", "staged claude"),
 			actionLine("apply", "codex", "skip", "nothing staged"),
 			actionLine("apply", "opencode", "0", "brew cache (formula opencode)"),
 			"clifleet-probe/1",
 			withBrew(present("opencode", "/opt/homebrew/bin/opencode", "/opt/homebrew/Cellar/opencode/1.3.0/bin/opencode", "1.3.0"), "formula", "opencode"),
 			withPkg(present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "0.163.0"), "@openai/codex"),
-			present("claude", "/home/a/.local/bin/claude", "/home/a/.local/bin/claude", "2.1.40"),
+			present("claude", "/home/a/.local/bin/claude", "/home/a/.local/bin/claude", "2.1.44"),
 			present("cursor", "/usr/local/bin/cursor", "/Applications/Cursor.app/Contents/Resources/app/bin/cursor", "3.0.0"),
 		}, "\n") + "\n"},
 	}
@@ -249,14 +255,14 @@ tools = ["claude", "codex", "cursor", "opencode"]
 	if err != nil || applied.Failed() {
 		t.Fatalf("apply should skip a missing stamp without failing the host: %v %s", err, applied.Summary())
 	}
-	if !strings.Contains(applied.Summary(), "1 applied") {
+	if !strings.Contains(applied.Summary(), "2 applied") {
 		t.Fatal(applied.Summary())
 	}
 	applyScript := strings.Join(fake.Scripts(), "\n")
 	if strings.Contains(applyScript, "npm pack") || strings.Contains(applyScript, "@latest") || strings.Contains(applyScript, "brew fetch") {
 		t.Fatalf("apply re-downloaded:\n%s", applyScript)
 	}
-	if !strings.Contains(applyScript, "apply_npm 'codex'") || !strings.Contains(applyScript, "apply_brew 'opencode'") {
+	if !strings.Contains(applyScript, "apply_npm 'codex'") || !strings.Contains(applyScript, "apply_brew 'opencode'") || !strings.Contains(applyScript, "apply_release_claude 'claude'") {
 		t.Fatalf("apply script:\n%s", applyScript)
 	}
 	if strings.Contains(applyScript, "apply_npm 'claude'") || strings.Contains(applyScript, "apply_brew 'cursor'") {
@@ -274,7 +280,7 @@ tools = ["claude", "codex", "cursor", "opencode"]
 					t.Fatalf("opencode %+v", row)
 				}
 			case "claude":
-				if row.Status != StNoStage {
+				if row.Status != StApplied || !strings.Contains(row.Version, "2.1.40 → 2.1.44") {
 					t.Fatalf("claude %+v", row)
 				}
 			}
@@ -288,7 +294,7 @@ tools = ["claude", "codex", "cursor", "opencode"]
 			present("claude", "/home/a/.local/bin/claude", "/home/a/.local/bin/claude", "2.1.44"),
 		)},
 	}
-	oneShot, err := Upgrade(context.Background(), cfg, Options{Only: []string{"claude"}}, fake)
+	oneShot, err := Upgrade(context.Background(), cfg, Options{Only: []string{"claude"}, OneShot: true}, fake)
 	if err != nil || oneShot.Failed() {
 		t.Fatalf("one-shot %v %s", err, oneShot.Summary())
 	}
@@ -313,7 +319,7 @@ tools = ["codex"]
 		t.Fatal(err, report.Summary())
 	}
 	line := strings.Join(report.Lines()[0], " | ")
-	if !strings.Contains(line, "npm install -g --no-fund --no-audit") || !strings.Contains(line, "<staged>.tgz") || strings.Contains(line, "@latest") {
+	if !strings.Contains(line, "npm install -g") || !strings.Contains(line, "--prefix") || !strings.Contains(line, "<staged>.tgz") || strings.Contains(line, "@latest") {
 		t.Fatalf("apply dry-run %s", line)
 	}
 	if !strings.Contains(report.Summary(), "would apply") {
@@ -428,6 +434,187 @@ func (f *fakeRunner) Timeouts() []time.Duration {
 	out := make([]time.Duration, len(f.timeouts))
 	copy(out, f.timeouts)
 	return out
+}
+
+func TestFetchFailureDoesNotPoisonSiblings(t *testing.T) {
+	cfg := parseFleet(t, `
+[[hosts]]
+name = "box"
+ssh = "box"
+tools = ["codex", "opencode"]
+`)
+	probe := probeOut(
+		withPkg(present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "0.1.0"), "@openai/codex"),
+		withBrew(present("opencode", "/opt/homebrew/bin/opencode", "/opt/homebrew/Cellar/opencode/1.0.0/bin/opencode", "1.0.0"), "formula", "opencode"),
+	)
+	fake := &selectiveRunner{probe: probe}
+	got, err := Upgrade(context.Background(), cfg, Options{Phase: PhaseFetch, Timeout: 10 * time.Minute}, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Failed() {
+		t.Fatal("the slow tool should still fail the run")
+	}
+	saw := map[string]Row{}
+	for _, h := range got.Hosts {
+		if h.Error != "" {
+			t.Fatalf("host error poisoned the fleet: %s", h.Error)
+		}
+		for _, row := range h.Rows {
+			saw[row.Tool] = row
+		}
+	}
+	if saw["codex"].Status != StStaged || saw["codex"].Failed {
+		t.Fatalf("codex should have staged despite brew: %+v", saw["codex"])
+	}
+	if saw["opencode"].Status != StFailed || !strings.Contains(saw["opencode"].Detail, "timed out") {
+		t.Fatalf("opencode %+v", saw["opencode"])
+	}
+	var fetches int
+	for _, script := range fake.scripts {
+		if strings.Contains(script, "clifleet-fetch/1") {
+			fetches++
+		}
+	}
+	if fetches != 2 {
+		t.Fatalf("expected one fetch process per tool, got %d", fetches)
+	}
+}
+
+func TestFetchTimeoutKeepsPartialSuccess(t *testing.T) {
+	cfg := parseFleet(t, `
+[[hosts]]
+name = "box"
+ssh = "box"
+tools = ["codex", "opencode"]
+`)
+	probe := probeOut(
+		withPkg(present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "0.1.0"), "@openai/codex"),
+		withBrew(present("opencode", "/opt/homebrew/bin/opencode", "/opt/homebrew/Cellar/opencode/1.0.0/bin/opencode", "1.0.0"), "formula", "opencode"),
+	)
+	fake := &selectiveRunner{
+		probe:   probe,
+		partial: "clifleet-fetch/1\n" + actionLine("fetch", "codex", "0", "/cache/codex.tgz") + "\n",
+	}
+	got, err := Upgrade(context.Background(), cfg, Options{Phase: PhaseFetch}, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saw := map[string]Row{}
+	for _, h := range got.Hosts {
+		for _, row := range h.Rows {
+			saw[row.Tool] = row
+		}
+	}
+	if saw["codex"].Status != StStaged || saw["codex"].Failed {
+		t.Fatalf("partial fetch should stay staged: %+v", saw["codex"])
+	}
+	if saw["opencode"].Status != StFailed {
+		t.Fatalf("opencode %+v", saw["opencode"])
+	}
+}
+
+func TestDefaultUpgradeFetchesBeforeApply(t *testing.T) {
+	cfg := parseFleet(t, `
+[[hosts]]
+name = "box"
+ssh = "box"
+tools = ["agy", "codex"]
+`)
+	probe := probeOut(
+		present("agy", "/home/a/.local/bin/agy", "/home/a/.local/bin/agy", "1.0.0"),
+		withPkg(present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "0.1.0"), "@openai/codex"),
+	)
+	fake := &fakeRunner{
+		probe: map[string]string{"box": probe},
+		fetch: map[string]string{"box": "clifleet-fetch/1\n" + actionLine("fetch", "codex", "0", "/cache/codex.tgz") + "\n"},
+		apply: map[string]string{"box": strings.Join([]string{
+			"clifleet-apply/1",
+			actionLine("apply", "codex", "0", "/cache/codex.tgz"),
+			"clifleet-probe/1",
+			withPkg(present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "9.0.0"), "@openai/codex"),
+			present("agy", "/home/a/.local/bin/agy", "/home/a/.local/bin/agy", "1.0.0"),
+		}, "\n") + "\n"},
+	}
+	got, err := Upgrade(context.Background(), cfg, Options{}, fake)
+	if err != nil || got.Failed() {
+		t.Fatalf("%v %s %v", err, got.Summary(), got.Errors())
+	}
+	if !strings.Contains(got.Summary(), "1 upgraded") || !strings.Contains(got.Summary(), "1 no-stage") {
+		t.Fatal(got.Summary())
+	}
+	joined := strings.Join(fake.Scripts(), "\n")
+	if strings.Contains(joined, "clifleet-upgrade/1") || strings.Contains(joined, "'agy' 'update'") {
+		t.Fatalf("default upgrade one-shot a native tool:\n%s", joined)
+	}
+	if !strings.Contains(joined, "stage_npm 'codex'") || !strings.Contains(joined, "apply_npm 'codex'") {
+		t.Fatalf("default upgrade did not fetch then apply:\n%s", joined)
+	}
+	for _, h := range got.Hosts {
+		for _, row := range h.Rows {
+			switch row.Tool {
+			case "codex":
+				if row.Status != StApplied || !strings.Contains(row.Version, "0.1.0 → 9.0.0") {
+					t.Fatalf("codex %+v", row)
+				}
+			case "agy":
+				if row.Status != StNoStage {
+					t.Fatalf("agy %+v", row)
+				}
+			}
+		}
+	}
+}
+
+func TestBlockedEngineIsNotAFailedApply(t *testing.T) {
+	cfg := parseFleet(t, `
+[[hosts]]
+name = "box"
+ssh = "box"
+tools = ["openclaw"]
+`)
+	probe := probeOut(withPkg(
+		present("openclaw", "/usr/local/bin/openclaw", "/usr/local/lib/node_modules/openclaw/bin.js", "2026.10.1"),
+		"openclaw",
+	))
+	fake := &fakeRunner{
+		probe: map[string]string{"box": probe},
+		fetch: map[string]string{"box": "clifleet-fetch/1\n" + actionLine("fetch", "openclaw", "blocked", "requires Node >=24.22.1 <25 || >=26.12.1 (host has v22.11.0)") + "\n"},
+	}
+	got, err := Upgrade(context.Background(), cfg, Options{Phase: PhaseFetch}, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Failed() {
+		t.Fatalf("blocked should not fail the run: %s %v", got.Summary(), got.Errors())
+	}
+	if !strings.Contains(got.Summary(), "1 blocked") {
+		t.Fatal(got.Summary())
+	}
+	row := got.Hosts[0].Rows[0]
+	if row.Status != StBlocked || !strings.Contains(row.Detail, "24.22.1") || !strings.Contains(row.Detail, "v22.11.0") {
+		t.Fatalf("%+v", row)
+	}
+}
+
+type selectiveRunner struct {
+	probe   string
+	partial string
+	scripts []string
+}
+
+func (s *selectiveRunner) Run(_ context.Context, target runner.Target, script string) (string, string, error) {
+	s.scripts = append(s.scripts, target.Name+"\n"+script)
+	switch {
+	case strings.Contains(script, "stage_brew 'opencode'"):
+		return "", "brew fetch hung", errString("timed out after 10m0s")
+	case strings.Contains(script, "stage_npm 'codex'") && s.partial != "":
+		return s.partial, "timed out after the codex line", errString("timed out after 10m0s")
+	case strings.Contains(script, "clifleet-fetch/1"):
+		return "clifleet-fetch/1\n" + actionLine("fetch", "codex", "0", "/cache/codex.tgz") + "\n", "", nil
+	default:
+		return s.probe, "", nil
+	}
 }
 
 func TestStatusBudgetAndUnreachableDetail(t *testing.T) {

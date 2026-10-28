@@ -112,7 +112,7 @@ func TestFetchApplyFlags(t *testing.T) {
 		t.Fatal(code)
 	}
 	help := errBuf.String()
-	for _, want := range []string{"--fetch", "--apply", "no-stage", "npm pack", "--hosts", "--only", "--timeout", "--parallel", "--json", "--dry-run"} {
+	for _, want := range []string{"--fetch", "--apply", "--one-shot", "no-stage", "npm pack", "--hosts", "--only", "--timeout", "--parallel", "--json", "--dry-run"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("help missing %q\n%s", want, help)
 		}
@@ -137,10 +137,10 @@ func TestFetchApplyFlags(t *testing.T) {
 	errBuf.Reset()
 	code := Execute(append([]string{"upgrade", "--dry-run"}, args...), &out, &errBuf)
 	if code != 0 {
-		t.Fatalf("one-shot %d\n%s\n%s", code, out.String(), errBuf.String())
+		t.Fatalf("safe upgrade %d\n%s\n%s", code, out.String(), errBuf.String())
 	}
-	if !strings.Contains(errBuf.String(), stagedTip) {
-		t.Fatalf("missing tip\n%s", errBuf.String())
+	if strings.Contains(errBuf.String(), noStageTip) {
+		t.Fatalf("missing tool should not warn about no-stage\n%s", errBuf.String())
 	}
 	if !strings.Contains(out.String(), "not installed") {
 		t.Fatalf("one-shot output\n%s", out.String())
@@ -152,7 +152,7 @@ func TestFetchApplyFlags(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("fetch json %d\n%s\n%s", code, out.String(), errBuf.String())
 	}
-	if !strings.Contains(out.String(), `"phase": "fetch"`) || strings.Contains(errBuf.String(), stagedTip) {
+	if !strings.Contains(out.String(), `"phase": "fetch"`) || strings.Contains(errBuf.String(), noStageTip) {
 		t.Fatalf("stdout %s\nstderr %s", out.String(), errBuf.String())
 	}
 
@@ -162,8 +162,8 @@ func TestFetchApplyFlags(t *testing.T) {
 	if code != 0 || !strings.Contains(out.String(), "not installed") || !strings.Contains(out.String(), "would stage") {
 		t.Fatalf("fetch alias %d\n%s\n%s", code, out.String(), errBuf.String())
 	}
-	if strings.Contains(errBuf.String(), stagedTip) {
-		t.Fatal("fetch printed the one-shot tip")
+	if strings.Contains(errBuf.String(), noStageTip) {
+		t.Fatal("fetch printed the no-stage tip")
 	}
 
 	out.Reset()

@@ -14,12 +14,16 @@ const (
 	ActionSkip    = "skip"
 	ActionFail    = "fail"
 
-	// ReasonNoStageNative is the fetch/apply status for a self-updater.
-	// There is no stable public artifact URL, so the one-shot path stays.
-	ReasonNoStageNative = "native updater has no staged artifact; use clifleet upgrade"
-	ReasonNoStageBun    = "bun global installs are not staged; use clifleet upgrade"
-	ReasonNoStagePnpm   = "pnpm global installs are not staged; use clifleet upgrade"
-	ReasonNoStageYarn   = "yarn global installs are not staged; use clifleet upgrade"
+	// KindRelease is a documented GitHub release asset (Codex package or
+	// Claude Code binary). It is not an HTML scrape.
+	KindRelease = "release"
+
+	// ReasonNoStageNative is the fetch/apply status for a self-updater that
+	// has no documented artifact URL. The one-shot path is explicit.
+	ReasonNoStageNative = "native updater has no staged artifact; use clifleet upgrade --one-shot"
+	ReasonNoStageBun    = "bun global installs are not staged; use clifleet upgrade --one-shot"
+	ReasonNoStagePnpm   = "pnpm global installs are not staged; use clifleet upgrade --one-shot"
+	ReasonNoStageYarn   = "yarn global installs are not staged; use clifleet upgrade --one-shot"
 )
 
 // CacheDisplayRoot is the per-host cache shown in dry-run lines.
@@ -32,10 +36,11 @@ type StagePlan struct {
 	Method    string
 	Action    string
 	Reason    string
-	Kind      string // "npm" or "brew" when Action is stage
+	Kind      string // "npm", "brew", or "release" when Action is stage
 	Package   string
 	BrewToken string
 	BrewKind  string
+	Release   string // "codex" or "claude" when Kind is release
 	Fetch     *Command
 	Apply     *Command
 }
@@ -43,9 +48,11 @@ type StagePlan struct {
 // PlanStage chooses a staged upgrade for an observation.
 //
 // npm downloads a registry tarball with npm pack. Homebrew downloads a
-// bottle or cask with brew fetch. Native self-updaters, and bun, pnpm, and
-// yarn global installs, are no-stage: clifleet will not invent a download
-// URL. A tool that is not installed yields a skip and nil commands.
+// bottle or cask with brew fetch. Native Codex and Claude Code download the
+// documented GitHub release asset for the host platform. Other native
+// self-updaters, and bun, pnpm, and yarn global installs, are no-stage:
+// clifleet will not invent a download URL. A tool that is not installed
+// yields a skip and nil commands.
 func PlanStage(spec Spec, obs Observation, methodOverride string) StagePlan {
 	if !obs.Present {
 		return StagePlan{Action: ActionSkip, Reason: "not installed"}
@@ -76,9 +83,65 @@ func PlanStage(spec Spec, obs Observation, methodOverride string) StagePlan {
 	case MethodYarn:
 		return StagePlan{Method: MethodYarn, Action: ActionNoStage, Reason: ReasonNoStageYarn}
 	case MethodNative:
+		if id, ok := nativeRelease(spec.Name); ok {
+			return releaseStage(id)
+		}
 		return StagePlan{Method: MethodNative, Action: ActionNoStage, Reason: ReasonNoStageNative}
 	default:
 		return StagePlan{Method: cmd.Method, Action: ActionNoStage, Reason: ReasonNoStageNative}
+	}
+}
+
+// nativeRelease reports the staged-artifact id for a native install.
+// cursor-agent's id uses an underscore because it becomes a shell function name.
+func nativeRelease(name string) (string, bool) {
+	switch name {
+	case "codex", "claude", "agent", "opencode":
+		return name, true
+	case "cursor-agent":
+		return "cursor_agent", true
+	default:
+		return "", false
+	}
+}
+
+func releaseStage(id string) StagePlan {
+	var fetchDisplay, applyDisplay string
+	switch id {
+	case "codex":
+		// releases.openai.com channel latest, then codex-package-<triple>.tar.gz.
+		// GitHub rust-v<version> is the fallback. Apply flips the standalone current link.
+		fetchDisplay = "curl -fsSL https://releases.openai.com/codex/releases/<version>/codex-package-<triple>.tar.gz"
+		applyDisplay = "swap staged Codex package into place"
+	case "opencode":
+		// opencode.ai's npm channel is 2.x. GitHub latest can still be 1.x.
+		fetchDisplay = "curl -fsSL https://opencode.ai/update/api/latest/cli/npm && npm pack @opencode/cli@<version>"
+		applyDisplay = "swap staged OpenCode package into place"
+	case "claude":
+		// downloads.claude.ai publishes manifest.json (sha256 per platform) and
+		// the binary at <version>/<platform>/claude. Apply drops it in
+		// ~/.local/share/claude/versions/<version> and retargets the symlink.
+		fetchDisplay = "curl -fsSL https://downloads.claude.ai/claude-code-releases/<version>/manifest.json && sha256"
+		applyDisplay = "retarget ~/.local/bin/claude at the staged version"
+	case "agent", "cursor_agent":
+		// Official installer publishes downloads.cursor.com/lab/<version>/<os>/<arch>/agent-cli-package.tar.gz
+		// and extracts it under ~/.local/share/cursor-agent/versions/<version>.
+		fetchDisplay = "curl -fsSL https://downloads.cursor.com/lab/<version>/<os>/<arch>/agent-cli-package.tar.gz"
+		applyDisplay = "retarget ~/.local/bin agent symlink at the staged version"
+	default:
+		return StagePlan{Method: MethodNative, Action: ActionNoStage, Reason: ReasonNoStageNative}
+	}
+	return StagePlan{
+		Method:  MethodNative,
+		Action:  ActionStage,
+		Kind:    KindRelease,
+		Release: id,
+		Fetch: &Command{
+			Argv: []string{"curl", "-fsSL", fetchDisplay}, Method: MethodNative, Display: fetchDisplay,
+		},
+		Apply: &Command{
+			Argv: []string{"clifleet-apply", id}, Method: MethodNative, Display: applyDisplay,
+		},
 	}
 }
 
@@ -88,7 +151,8 @@ func npmStage(tool, pkg string) StagePlan {
 	}
 	dest := CacheDisplayRoot + "/npm/" + tool
 	fetchArgv := []string{"npm", "pack", "--loglevel=error", "--pack-destination", dest, pkg + "@latest"}
-	applyArgv := []string{"npm", "install", "-g", "--no-fund", "--no-audit", dest + "/<staged>.tgz"}
+	applyArgv := []string{"npm", "install", "-g", "--prefix", "<tmp>", "--no-fund", "--no-audit", dest + "/<staged>.tgz"}
+	applyDisplay := shellquote.Display(applyArgv) + " && swap the package directory"
 	return StagePlan{
 		Method:  MethodNpm,
 		Action:  ActionStage,
@@ -98,7 +162,7 @@ func npmStage(tool, pkg string) StagePlan {
 			Argv: fetchArgv, Method: MethodNpm, Display: shellquote.Display(fetchArgv), Package: pkg,
 		},
 		Apply: &Command{
-			Argv: applyArgv, Method: MethodNpm, Display: shellquote.Display(applyArgv), Package: pkg,
+			Argv: applyArgv, Method: MethodNpm, Display: applyDisplay, Package: pkg,
 		},
 	}
 }

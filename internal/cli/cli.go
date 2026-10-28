@@ -150,47 +150,41 @@ const upgradeHelp = `Usage:
   clifleet fetch [flags]
   clifleet apply [flags]
 
-On each host, upgrade the candidate CLIs that are already installed,
-using that host's install method:
+On each host, upgrade the candidate CLIs that are already installed.
+The default downloads first and then swaps, one tool at a time, so a new
+terminal is not opened against a binary that is mid-replace:
 
-  native Claude Code     claude update
-  native Codex           codex update
-  native OpenCode        opencode upgrade
-  npm                    npm install -g <package>@latest
-  Homebrew cask          brew upgrade --cask <token>
-  Homebrew formula       brew upgrade <token>
+  npm                  npm pack @latest, install into a temp prefix, swap the package dir
+  Homebrew             brew fetch, then brew upgrade (auto-update off)
+  native Codex         GitHub release codex-package-<platform>.tar.gz, then swap
+  native Claude Code   downloads.claude.ai manifest + sha256, then retarget the version symlink
+  native Cursor Agent  downloads.cursor.com lab tarball, then retarget the version symlink
 
-The built-in catalog is wider than those three. Each tool uses the channel
-that matches the binary on disk. A tool with no recipe for that channel is
-skipped. Opt-in names (dsh, grok, kilo, kiro-cli) are not searched unless
-the fleet file lists them.
+--fetch and --apply run those two phases on their own. clifleet fetch and
+clifleet apply are the same steps. --fetch does not replace the live binary.
+--fetch and --apply together are an error.
+
+A tool with no staged artifact (most other native updaters, and bun, pnpm,
+and yarn globals) is marked no-stage and left alone. clifleet upgrade
+--one-shot runs that updater in place (claude update, codex update, and the
+rest). That is the path that can leave a binary missing while it downloads.
+
+The built-in catalog is wider than those channels. Each tool uses the
+install method on disk. A tool with no recipe for that channel is skipped.
+Opt-in names (dsh, grok, kilo, kiro-cli) are not searched unless the fleet
+file lists them.
 
 A missing CLI is skipped. clifleet will not brew install, npm install a
 tool that is not already on PATH, or curl an installer. Commands run
 without a TTY (stdin is /dev/null) and with non-interactive brew and npm
-settings. The exit code is non-zero if any host cannot be reached or any
-upgrade command fails.
+settings. The timeout is per tool for the default upgrade, --fetch, and
+--apply, so one slow download cannot fail the other tools on that host.
+The exit code is non-zero if any host cannot be reached or any upgrade
+command fails. A package whose engines do not match the host Node is
+blocked, not a failed apply.
 
 --dry-run still connects, so the printed command matches the install
 method on disk, but it does not run the upgrade.
-
-On a live machine, split the download from the swap so new sessions are
-not opened against a binary that is mid-replace:
-
-  clifleet upgrade --fetch    download into ~/.cache/clifleet (or $XDG_CACHE_HOME/clifleet)
-  clifleet upgrade --apply    install from that cache
-
-clifleet fetch and clifleet apply are the same two steps. --fetch does
-not replace the live binary. npm is staged with npm pack and applied with
-npm install -g of that tarball. Homebrew is staged with brew update and
-brew fetch, then applied with brew upgrade (auto-update off). That apply
-still swaps the keg or cask; the download already happened.
-
-Native self-updaters (claude update, codex update, agent update, and the
-rest) have no stable artifact URL. --fetch marks them no-stage and leaves
-them for a one-shot clifleet upgrade. Bun, pnpm, and yarn global installs
-are no-stage for the same reason. A tool with nothing staged is skipped
-on --apply. --fetch and --apply together are an error.
 
 Flags:
   -c, --config PATH
@@ -200,21 +194,22 @@ Flags:
       --parallel N
       --fetch            Stage artifacts; do not replace binaries
       --apply            Install from the staged cache
+      --one-shot         Run native updaters in place instead of fetch-then-swap
       --dry-run
       --json
   -v, --verbose
   -h, --help
 
 Examples:
+  clifleet upgrade
   clifleet upgrade --dry-run
-  clifleet upgrade --fetch --dry-run
   clifleet upgrade --fetch --only codex
   clifleet upgrade --apply
-  clifleet upgrade --only claude
+  clifleet upgrade --one-shot --only agent
   clifleet upgrade --hosts us-server,workshop
 `
 
-const stagedTip = "Tip: on a live machine, clifleet upgrade --fetch then clifleet upgrade --apply downloads first and keeps the binary swap short."
+const noStageTip = "Tip: tools marked no-stage have no staged artifact. clifleet upgrade --one-shot runs their updater in place."
 
 const doctorHelp = `Usage:
   clifleet doctor [flags]
@@ -322,7 +317,7 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 		help = upgradeHelp
 		name = "upgrade"
 	}
-	var dry, jsonOut, verbose, fetch, apply bool
+	var dry, jsonOut, verbose, fetch, apply, oneShot bool
 	opt, fs, err := parseFlags(args, stderr, help, func(fs *flag.FlagSet) {
 		fs.BoolVar(&dry, "dry-run", false, "do not change hosts")
 		fs.BoolVar(&jsonOut, "json", false, "print JSON")
@@ -331,6 +326,7 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 		if upgrade {
 			fs.BoolVar(&fetch, "fetch", false, "stage artifacts, do not replace binaries")
 			fs.BoolVar(&apply, "apply", false, "install from the staged cache")
+			fs.BoolVar(&oneShot, "one-shot", false, "run native updaters in place")
 		}
 	})
 	if err != nil {
@@ -345,6 +341,10 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 	}
 	if fetch && apply {
 		fmt.Fprintf(stderr, "clifleet upgrade: --fetch and --apply are separate steps\n")
+		return 1
+	}
+	if oneShot && (fetch || apply) {
+		fmt.Fprintf(stderr, "clifleet upgrade: --one-shot cannot be combined with --fetch or --apply\n")
 		return 1
 	}
 	phase := fleet.PhaseUpgrade
@@ -377,7 +377,7 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 	fopt := fleet.Options{
 		Hosts: opt.hosts, Only: opt.only, DryRun: dry,
 		Parallel: parallel, Timeout: timeout, Verbose: verbose,
-		Phase: phase, OnProgress: progress,
+		Phase: phase, OneShot: oneShot, OnProgress: progress,
 	}
 	var report fleet.Report
 	if upgrade {
@@ -408,8 +408,8 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 		fmt.Fprintln(stdout, table.Render([]string{"HOST", "TOOL", "VERSION", "METHOD", "STATUS"}, lines, colorEnabled(stdout)))
 	}
 	fmt.Fprintln(stdout, report.Summary())
-	if upgrade && phase == fleet.PhaseUpgrade {
-		fmt.Fprintln(stderr, stagedTip)
+	if upgrade && phase == fleet.PhaseUpgrade && !oneShot && reportHasNoStage(report) {
+		fmt.Fprintln(stderr, noStageTip)
 	}
 	for _, e := range report.Errors() {
 		fmt.Fprintf(stderr, "%s\n", e)
@@ -426,6 +426,17 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 		return 2
 	}
 	return 0
+}
+
+func reportHasNoStage(report fleet.Report) bool {
+	for _, h := range report.Hosts {
+		for _, row := range h.Rows {
+			if row.Status == fleet.StNoStage {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func cmdDoctor(args []string, stdout, stderr io.Writer) int {

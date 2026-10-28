@@ -10,23 +10,26 @@ import (
 )
 
 // StageStep is one installed tool whose artifact can be downloaded ahead
-// of the binary swap. Kind is "npm" or "brew".
+// of the binary swap. Kind is "npm", "brew", or "release".
 type StageStep struct {
 	Tool      string
 	Kind      string
 	Package   string
 	BrewKind  string
 	BrewToken string
+	Release   string // "codex" or "claude" when Kind is release
 }
 
 // ActionResult is one fetch or apply line from the remote script.
 // Skip is set when the tool had nothing staged. Exit is the command
 // status otherwise. Detail is a cache path or a short reason.
 type ActionResult struct {
-	Tool   string
-	Exit   int
-	Skip   string
-	Detail string
+	Tool    string
+	Exit    int
+	Skip    string
+	Blocked string
+	Current bool
+	Detail  string
 }
 
 const fetchHeader = "clifleet-fetch/1"
@@ -95,10 +98,25 @@ stage_npm() {
     cf_report fetch "$tool" 1 "missing tarball"
     return 0
   fi
+  ver=$(cf_tarball_version "$tarball")
+  eng=$(cf_tarball_engines "$tarball")
+  [ -n "$ver" ] || ver=-
+  [ -n "$eng" ] || eng=-
+  plat=-
+  if [ "$pkg" = "@openai/codex" ] && [ "$ver" != - ]; then
+    plat=$(cf_pack_codex_platform "$dest" "$ver") || {
+      cf_report fetch "$tool" 1 "could not pack the Codex platform package"
+      return 0
+    }
+  fi
   tmp="$root/staged/$tool.tmp"
-  printf 'npm\t%s\t%s\n' "$pkg" "$tarball" > "$tmp" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
+  printf 'npm\t%s\t%s\t%s\t%s\t%s\n' "$pkg" "$tarball" "$ver" "$eng" "$plat" > "$tmp" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
   mv -f "$tmp" "$root/staged/$tool" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
-  cf_report fetch "$tool" 0 "$tarball"
+  est=$(cf_engines_status "$eng")
+  case $est in
+    ok) cf_report fetch "$tool" 0 "$tarball" ;;
+    *) cf_report fetch "$tool" blocked "${est#blocked: }" ;;
+  esac
 }
 
 stage_brew() {
@@ -154,10 +172,12 @@ apply_npm() {
     return 0
   fi
   line=$(head -n 1 "$stamp" | tr -d '\r')
-  tab=$(printf '\t')
-  kind=${line%%$tab*}
-  rest=${line#*$tab}
-  tarball=${rest#*$tab}
+  kind=$(cf_stamp_field "$line" 1)
+  pkg=$(cf_stamp_field "$line" 2)
+  tarball=$(cf_stamp_field "$line" 3)
+  ver=$(cf_stamp_field "$line" 4)
+  eng=$(cf_stamp_field "$line" 5)
+  plat=$(cf_stamp_field "$line" 6)
   if [ "$kind" != npm ]; then
     cf_report apply "$tool" 1 "staged artifact is not an npm tarball"
     return 0
@@ -184,13 +204,7 @@ apply_npm() {
     cf_report apply "$tool" 1 "staged tarball missing"
     return 0
   fi
-  rc=0
-  npm install -g --no-fund --no-audit "$tarball" </dev/null >&2 || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    cf_report apply "$tool" "$rc" "npm install failed"
-    return 0
-  fi
-  cf_report apply "$tool" 0 "$tarball"
+  cf_apply_npm_safe "$tool" "$pkg" "$tarball" "$plat" "$ver" "$eng"
 }
 
 apply_brew() {
@@ -243,6 +257,8 @@ func FetchScript(extraPaths []string, steps []StageStep) (string, error) {
 	var b strings.Builder
 	b.WriteString(body)
 	b.WriteString(stagePrelude)
+	b.WriteString(fetchSafeShell)
+	b.WriteString(codexPackShell)
 	b.WriteString(fetchFns)
 	// Allow an explicit brew update. brew fetch below turns auto-update
 	// back off so a fetch cannot grow into an upgrade.
@@ -255,6 +271,20 @@ export npm_config_audit=false
 export npm_config_update_notifier=false
 printf '%s\n' 'clifleet-fetch/1'
 `)
+	if fetchHasBrew(steps) {
+		// One brew update for the script, in this shell. Each stage_brew then
+		// runs under cf_limit, which is a subshell and would not see an update
+		// performed inside another tool.
+		b.WriteString(`if command -v brew >/dev/null 2>&1; then
+  if brew update </dev/null >&2; then
+    cf_brew_update=ok
+    export HOMEBREW_NO_AUTO_UPDATE=1
+  else
+    cf_brew_update=fail
+  fi
+fi
+`)
+	}
 	if err := writeStageCalls(&b, steps, true); err != nil {
 		return "", err
 	}
@@ -276,6 +306,7 @@ func ApplyScript(reprobe []Tool, extraPaths []string, steps []StageStep) (string
 	var b strings.Builder
 	b.WriteString(body)
 	b.WriteString(stagePrelude)
+	b.WriteString(applySafeShell)
 	b.WriteString(applyFns)
 	b.WriteString(`export NONINTERACTIVE=1
 export HOMEBREW_NO_AUTO_UPDATE=1
@@ -307,26 +338,56 @@ func writeStageCalls(b *strings.Builder, steps []StageStep, fetch bool) error {
 			return fmt.Errorf("duplicate stage step for %s", step.Tool)
 		}
 		seen[step.Tool] = struct{}{}
+		var call string
 		switch step.Kind {
 		case catalog.MethodNpm:
-			fn := "apply_npm"
 			if fetch {
-				fn = "stage_npm"
-				fmt.Fprintf(b, "%s %s %s\n", fn, shellquote.Quote(step.Tool), shellquote.Quote(step.Package))
-				continue
+				call = fmt.Sprintf("stage_npm %s %s", shellquote.Quote(step.Tool), shellquote.Quote(step.Package))
+			} else {
+				call = fmt.Sprintf("apply_npm %s", shellquote.Quote(step.Tool))
 			}
-			fmt.Fprintf(b, "%s %s\n", fn, shellquote.Quote(step.Tool))
 		case catalog.MethodBrew:
 			if fetch {
-				fmt.Fprintf(b, "stage_brew %s %s %s\n", shellquote.Quote(step.Tool), shellquote.Quote(step.BrewKind), shellquote.Quote(step.BrewToken))
-				continue
+				call = fmt.Sprintf("stage_brew %s %s %s", shellquote.Quote(step.Tool), shellquote.Quote(step.BrewKind), shellquote.Quote(step.BrewToken))
+			} else {
+				call = fmt.Sprintf("apply_brew %s", shellquote.Quote(step.Tool))
 			}
-			fmt.Fprintf(b, "apply_brew %s\n", shellquote.Quote(step.Tool))
+		case catalog.KindRelease:
+			fn := "apply_release_" + step.Release
+			if fetch {
+				fn = "stage_release_" + step.Release
+			}
+			call = fmt.Sprintf("%s %s", fn, shellquote.Quote(step.Tool))
 		default:
 			return fmt.Errorf("unknown stage kind %q", step.Kind)
 		}
+		writeLimited(b, fetch, step.Kind, step.Tool, call)
 	}
 	return nil
+}
+
+// writeLimited caps one stage or apply so a slow brew fetch cannot hold the
+// rest of the host script. npm is 120s. brew and release downloads are 180s.
+func fetchHasBrew(steps []StageStep) bool {
+	for _, step := range steps {
+		if step.Kind == catalog.MethodBrew {
+			return true
+		}
+	}
+	return false
+}
+
+func writeLimited(b *strings.Builder, fetch bool, kind, tool, call string) {
+	secs := "120"
+	if kind == catalog.MethodBrew || (fetch && kind == catalog.KindRelease) {
+		secs = "180"
+	}
+	tag := "apply"
+	if fetch {
+		tag = "fetch"
+	}
+	fmt.Fprintf(b, "rc=0\ncf_limit %s %s || rc=$?\n", secs, call)
+	fmt.Fprintf(b, "if [ \"$rc\" -eq 124 ]; then\n  cf_report %s %s 124 'timed out'\nfi\n", tag, shellquote.Quote(tool))
 }
 
 func validStageStep(step StageStep) error {
@@ -341,6 +402,10 @@ func validStageStep(step StageStep) error {
 	case catalog.MethodBrew:
 		if !catalog.BrewTokenOK(step.BrewToken) || !catalog.BrewKindOK(step.BrewKind) {
 			return fmt.Errorf("refusing unsafe brew target %q", step.BrewToken)
+		}
+	case catalog.KindRelease:
+		if step.Release != "codex" && step.Release != "claude" && step.Release != "agent" && step.Release != "cursor_agent" && step.Release != "opencode" {
+			return fmt.Errorf("unknown release %q", step.Release)
 		}
 	default:
 		return fmt.Errorf("unknown stage kind %q", step.Kind)
@@ -398,6 +463,16 @@ func parseActionLines(stdout, header, tag string) ([]ActionResult, error) {
 			res.Skip = res.Detail
 			if res.Skip == "" {
 				res.Skip = "skipped"
+			}
+		case "blocked":
+			res.Blocked = res.Detail
+			if res.Blocked == "" {
+				res.Blocked = "blocked"
+			}
+		case "current":
+			res.Current = true
+			if res.Detail == "" {
+				res.Detail = "up to date"
 			}
 		default:
 			code, err := strconv.Atoi(strings.TrimSpace(fields[3]))

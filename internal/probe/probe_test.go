@@ -16,10 +16,16 @@ func TestProbeScriptIsReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range []string{"curl", "wget", "npm ", "brew ", "apt-get", "pip "} {
+	for _, bad := range []string{"curl", "wget", "npm ", "brew install", "brew update", "brew upgrade", "brew fetch", "apt-get", "pip "} {
 		if strings.Contains(script, bad) {
 			t.Fatalf("probe script contains %q", bad)
 		}
+	}
+	if !strings.Contains(script, "/opt/homebrew/bin") || !strings.Contains(script, "/usr/local/bin") || !strings.Contains(script, "shellenv") {
+		t.Fatal("probe script does not set up Homebrew the way a login shell does")
+	}
+	if strings.LastIndex(script, "cf_ensure_path") < strings.Index(script, "nvm.sh") {
+		t.Fatal("homebrew paths are not re-applied after nvm")
 	}
 	if !strings.Contains(script, "</dev/null") {
 		t.Fatal("version check does not detach stdin")
@@ -258,6 +264,70 @@ func TestNvmCapDoesNotBlockTheHost(t *testing.T) {
 	}
 	if !obs["claude"].Present || ShortVersion(obs["claude"].Version) != "1.0.0" {
 		t.Fatalf("static PATH claude %+v", obs["claude"])
+	}
+}
+
+func TestLoginPathSurvivesNvmAndBrewShellenv(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	linuxbrew := filepath.Join(home, ".linuxbrew", "bin")
+	if err := os.MkdirAll(filepath.Join(home, ".nvm"), 0o755); err != nil || os.MkdirAll(linuxbrew, 0o755) != nil {
+		t.Fatal(err)
+	}
+	// nvm replaces PATH with the ssh default and drops the directories we prepended.
+	if err := os.WriteFile(filepath.Join(home, ".nvm", "nvm.sh"), []byte("PATH=/usr/bin:/bin\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(linuxbrew, "claude"), "#!/bin/sh\nprintf '2.4.0\\n'\n")
+	script, err := ProbeScript([]Tool{{Name: "claude", Binary: "claude"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-s")
+	cmd.Stdin = strings.NewReader(script)
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + home}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("probe failed: %v\n%s", err, out)
+	}
+	obs, err := ParseProbe(string(out))
+	if err != nil {
+		t.Fatalf("parse: %v\n%s", err, out)
+	}
+	if !obs["claude"].Present || ShortVersion(obs["claude"].Version) != "2.4.0" {
+		t.Fatalf("brew path was dropped after nvm: %+v\n%s", obs["claude"], out)
+	}
+
+	// Login shells also eval brew shellenv. A binary that is only on the
+	// prefix shellenv adds must still be visible.
+	brewonly := filepath.Join(home, "brewonly")
+	if err := os.MkdirAll(brewonly, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(linuxbrew, "brew"), "#!/bin/sh\nif [ \"$1\" = shellenv ]; then\n  printf 'export HOMEBREW_PREFIX=\"%s\"\\n' \"$HOME/.linuxbrew\"\n  printf 'export PATH=\"%s/brewonly:$PATH\"\\n' \"$HOME\"\n  exit 0\nfi\nexit 1\n")
+	if err := os.Remove(filepath.Join(linuxbrew, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(brewonly, "claude"), "#!/bin/sh\nprintf '9.9.9\\n'\n")
+	if err := os.Remove(filepath.Join(home, ".nvm", "nvm.sh")); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("sh", "-s")
+	cmd.Stdin = strings.NewReader(script)
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + home}
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("shellenv probe: %v\n%s", err, out)
+	}
+	obs, err = ParseProbe(string(out))
+	if err != nil {
+		t.Fatalf("parse: %v\n%s", err, out)
+	}
+	if !obs["claude"].Present || ShortVersion(obs["claude"].Version) != "9.9.9" {
+		t.Fatalf("brew shellenv was not applied: %+v\n%s", obs["claude"], out)
 	}
 }
 
