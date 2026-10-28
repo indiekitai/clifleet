@@ -65,14 +65,16 @@ var loginPathDirs = []string{
 	`"$HOME/.volta/bin"`,
 	`"$HOME/bin"`,
 	`"$HOME/.local/share/mise/shims"`,
-	`"$HOME/.linuxbrew/sbin"`,
-	`"$HOME/.linuxbrew/bin"`,
 	`/home/linuxbrew/.linuxbrew/sbin`,
 	`/home/linuxbrew/.linuxbrew/bin`,
 	`/usr/local/sbin`,
 	`/usr/local/bin`,
 	`/opt/homebrew/sbin`,
 	`/opt/homebrew/bin`,
+	// User linuxbrew is last so it is searched before a system brew. A test
+	// mock at ~/.linuxbrew/bin must win over /home/linuxbrew or /usr/local.
+	`"$HOME/.linuxbrew/sbin"`,
+	`"$HOME/.linuxbrew/bin"`,
 }
 
 const scriptFns = `
@@ -338,21 +340,25 @@ func writePathFn(b *strings.Builder, name, helper string, extra []string) error 
 // brew cannot hold the probe. This is not bash -lc.
 const brewEnvSnippet = `
 cf_brew_env() {
+  # PATH was just prepended, so command -v sees ~/.linuxbrew, path_extra, and
+  # /opt/homebrew before a brew that happens to exist elsewhere on the machine.
+  # Absolute paths are only a fallback for ssh -T if the directory test missed.
   brewbin=
-  if [ -x /opt/homebrew/bin/brew ]; then
+  if command -v brew >/dev/null 2>&1; then
+    brewbin=$(command -v brew)
+  elif [ -x /opt/homebrew/bin/brew ]; then
     brewbin=/opt/homebrew/bin/brew
   elif [ -x /usr/local/bin/brew ]; then
     brewbin=/usr/local/bin/brew
   elif [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
     brewbin=/home/linuxbrew/.linuxbrew/bin/brew
-  elif command -v brew >/dev/null 2>&1; then
-    brewbin=$(command -v brew)
   fi
   if [ -z "$brewbin" ]; then
     return 0
   fi
   envfile=$cf_dir/brew.env
   if cf_cap 5 "$envfile" "$brewbin" shellenv; then
+    # shellenv is a few export lines. Apply them without bash -lc.
     eval "$(cat "$envfile")"
   fi
 }
@@ -382,8 +388,11 @@ if [ -n "${HOME:-}" ] && [ -s "$HOME/.nvm/nvm.sh" ]; then
     fi
   fi
 fi
-cf_ensure_path
 cf_brew_env
+# shellenv and nvm both replace PATH. Put the standard directories back
+# afterwards so a login-style brew prefix cannot drop ~/.linuxbrew or
+# /opt/homebrew, and a wiped nvm PATH cannot drop brew.
+cf_ensure_path
 hash -r 2>/dev/null || true
 export PATH
 `
