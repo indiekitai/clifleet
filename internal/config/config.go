@@ -69,8 +69,11 @@ type Loaded struct {
 	Tools       []string
 	Concurrency int
 	Timeout     time.Duration
-	Hosts       []Host
-	Recipes     []Recipe
+	// TimeoutExplicit is true when the fleet file sets timeout. status uses
+	// a shorter budget only when this is false and the CLI did not pass one.
+	TimeoutExplicit bool
+	Hosts           []Host
+	Recipes         []Recipe
 }
 
 var (
@@ -145,7 +148,8 @@ func normalize(path string, raw File) (Loaded, error) {
 	}
 
 	timeout := DefaultTimeout
-	if strings.TrimSpace(raw.Timeout) != "" {
+	timeoutExplicit := strings.TrimSpace(raw.Timeout) != ""
+	if timeoutExplicit {
 		d, err := ParseDuration(raw.Timeout)
 		if err != nil {
 			return Loaded{}, fmt.Errorf("timeout: %w", err)
@@ -245,12 +249,13 @@ func normalize(path string, raw File) (Loaded, error) {
 	}
 
 	return Loaded{
-		Path:        path,
-		Tools:       tools,
-		Concurrency: concurrency,
-		Timeout:     timeout,
-		Hosts:       hosts,
-		Recipes:     recipes,
+		Path:            path,
+		Tools:           tools,
+		Concurrency:     concurrency,
+		Timeout:         timeout,
+		TimeoutExplicit: timeoutExplicit,
+		Hosts:           hosts,
+		Recipes:         recipes,
 	}, nil
 }
 

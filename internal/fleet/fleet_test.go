@@ -385,18 +385,20 @@ type errString string
 func (e errString) Error() string { return string(e) }
 
 type fakeRunner struct {
-	mu      sync.Mutex
-	scripts []string
-	probe   map[string]string
-	upgrade map[string]string
-	fetch   map[string]string
-	apply   map[string]string
-	fail    map[string]error
+	mu       sync.Mutex
+	scripts  []string
+	timeouts []time.Duration
+	probe    map[string]string
+	upgrade  map[string]string
+	fetch    map[string]string
+	apply    map[string]string
+	fail     map[string]error
 }
 
 func (f *fakeRunner) Run(_ context.Context, target runner.Target, script string) (string, string, error) {
 	f.mu.Lock()
 	f.scripts = append(f.scripts, target.Name+"\n"+script)
+	f.timeouts = append(f.timeouts, target.Timeout)
 	f.mu.Unlock()
 	if err := f.fail[target.Name]; err != nil {
 		return "", err.Error(), err
@@ -418,4 +420,61 @@ func (f *fakeRunner) Scripts() []string {
 	out := make([]string, len(f.scripts))
 	copy(out, f.scripts)
 	return out
+}
+
+func (f *fakeRunner) Timeouts() []time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]time.Duration, len(f.timeouts))
+	copy(out, f.timeouts)
+	return out
+}
+
+func TestStatusBudgetAndUnreachableDetail(t *testing.T) {
+	cfg := parseFleet(t, "[[hosts]]\nname = \"box\"\nssh = \"box\"\ntools = [\"claude\"]\n")
+	if cfg.TimeoutExplicit || cfg.Timeout != 3*time.Minute {
+		t.Fatalf("implicit timeout explicit=%v %s", cfg.TimeoutExplicit, cfg.Timeout)
+	}
+	fake := &fakeRunner{fail: map[string]error{"box": errString("connection refused")}}
+	report, err := Status(context.Background(), cfg, Options{}, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Failed() {
+		t.Fatal("expected unreachable")
+	}
+	got := fake.Timeouts()
+	if len(got) != 1 || got[0] != StatusBudget {
+		t.Fatalf("status budget %v", got)
+	}
+	line := strings.Join(report.Lines()[0], " | ")
+	if !strings.Contains(line, "unreachable (connection refused)") {
+		t.Fatal(line)
+	}
+	if len(report.Errors()) != 1 || !strings.Contains(report.Errors()[0], "box: connection refused") {
+		t.Fatalf("errors %v", report.Errors())
+	}
+
+	fake = &fakeRunner{probe: map[string]string{"box": probeOut(missing("claude"))}}
+	if _, err := Upgrade(context.Background(), cfg, Options{}, fake); err != nil {
+		t.Fatal(err)
+	}
+	got = fake.Timeouts()
+	if len(got) != 1 || got[0] != 3*time.Minute {
+		t.Fatalf("upgrade budget %v", got)
+	}
+
+	fake = &fakeRunner{probe: map[string]string{"box": probeOut(missing("claude"))}}
+	if _, err := Status(context.Background(), cfg, Options{Timeout: 10 * time.Second}, fake); err != nil {
+		t.Fatal(err)
+	}
+	got = fake.Timeouts()
+	if len(got) != 1 || got[0] != 10*time.Second {
+		t.Fatalf("cli timeout %v", got)
+	}
+
+	explicit := testFleet(t)
+	if !explicit.TimeoutExplicit {
+		t.Fatal("example timeout should be explicit")
+	}
 }

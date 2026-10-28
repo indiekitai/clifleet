@@ -35,6 +35,9 @@ tools = [
 ]
 
 concurrency = 8
+# Per-host session budget for upgrade, fetch, and apply. Omit it and status
+# uses 45s instead of 3m. A single CLI --version or nvm.sh is capped inside
+# the probe either way, so one stuck command cannot sit for this whole budget.
 timeout = "3m"
 
 [[hosts]]

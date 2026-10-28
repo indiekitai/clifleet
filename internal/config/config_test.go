@@ -18,8 +18,8 @@ func TestExampleParses(t *testing.T) {
 	if strings.Join(DefaultTools(), ",") != strings.Join(catalog.DefaultTools(), ",") {
 		t.Fatalf("config defaults drifted from catalog: %v", DefaultTools())
 	}
-	if cfg.Concurrency != 8 || cfg.Timeout.String() != "3m0s" {
-		t.Fatalf("concurrency %d timeout %s", cfg.Concurrency, cfg.Timeout)
+	if cfg.Concurrency != 8 || cfg.Timeout.String() != "3m0s" || !cfg.TimeoutExplicit {
+		t.Fatalf("concurrency %d timeout %s explicit %v", cfg.Concurrency, cfg.Timeout, cfg.TimeoutExplicit)
 	}
 	if len(cfg.Hosts) != 4 {
 		t.Fatalf("hosts %d", len(cfg.Hosts))

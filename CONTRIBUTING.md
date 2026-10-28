@@ -56,6 +56,11 @@ behavior when they think they are in CI. Prefer the upstream updater over a
 guessed `brew` or `npm` token. Do not add an installer (`brew install`, a
 curl script, `npm install` of a binary that is not already on `PATH`).
 
+`doctor` runs `true`. `status` and `upgrade` run `sh -s` with no TTY. nvm
+and each `--version` are capped and must not read the script's stdin. A
+timeout has to say whether that script started. Do not source a login shell
+or a profile from the probe.
+
 `upgrade --fetch` then `--apply` downloads into `$XDG_CACHE_HOME/clifleet`
 (or `~/.cache/clifleet`) and only then replaces the binary. npm is
 `npm pack` followed by `npm install -g` of that tarball. Homebrew is

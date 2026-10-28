@@ -119,13 +119,19 @@ host × tool × version × install method. Missing tools show as — and
 look for after allowlists, blocklists, and --only.
 
 --only narrows the candidate list. It cannot add a tool that a host
-allowlist or blocklist already excluded.
+allowlist or blocklist already excluded. A missing tool is "not installed",
+not a failure, and nothing is installed for you.
+
+Each --version is capped at a few seconds, and nvm is loaded from a
+child process so it cannot read this script or hang the host. doctor can
+succeed and status can still fail: doctor only runs true. The timeout
+error says whether the probe script started.
 
 Flags:
   -c, --config PATH      Fleet file (default ~/.config/clifleet/hosts.toml)
       --hosts LIST       Comma-separated host names or SSH aliases
       --only LIST        Comma-separated tools to look for
-      --timeout DURATION Per SSH session (default from the fleet file, else 3m)
+      --timeout DURATION Per host. Default 45s when the fleet file omits timeout, otherwise that value
       --parallel N       Concurrent sessions (default 8, max 64)
       --dry-run          Print the probe plan; do not connect
       --json             Machine-readable matrix

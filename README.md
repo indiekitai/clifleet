@@ -128,11 +128,22 @@ Other fields worth knowing:
 | Field | Meaning |
 | --- | --- |
 | `concurrency` | Parallel SSH sessions. Default 8, maximum 64. |
-| `timeout` | Per SSH session. Default `3m`. Bare numbers are seconds. |
+| `timeout` | Per-host session budget. Default `3m` for upgrade, fetch, and apply. `status` uses **45s** when this field is omitted and you do not pass `--timeout`. Bare numbers are seconds. |
 | `path_extra` | Absolute directories prepended to the remote `PATH`. |
 | `methods` | Force a channel for one installed tool: `brew`, `npm`, `bun`, `pnpm`, `yarn`, or `native`. Ignored when the binary is missing. |
 
-clifleet uses your `ssh` binary, so `ProxyJump`, agent keys, `Include`, and `Match` keep working. It sets `BatchMode=yes` so a password prompt fails fast instead of hanging. It does not turn off `StrictHostKeyChecking`.
+clifleet uses your `ssh` binary, so `ProxyJump`, agent keys, `Include`, and `Match` keep working. It sets `BatchMode=yes` so a password prompt fails fast instead of hanging. It forces no TTY (`-T`, `RequestTTY=no`) so a host config cannot turn `sh -s` into an interactive prompt. It does not turn off `StrictHostKeyChecking`.
+
+`clifleet doctor` only runs `true`. A line like "Connection ... port 22 succeeded" means the SSH session opened. `status` and `upgrade` then run a shell script: PATH setup, optional nvm, and `--version` for each candidate. That script can sit after doctor already returned. clifleet caps nvm at 5s and each `--version` at 3s, with stdin on `/dev/null`, so one stuck CLI cannot burn the whole host budget. Other hosts keep running. If the budget still fires, the row is `unreachable (timed out after ...)` and stderr says whether the probe script started. Narrow a live fleet while you look:
+
+```bash
+clifleet doctor --hosts omarchy
+clifleet status --hosts omarchy --only claude --timeout 45s
+clifleet upgrade --fetch --hosts omarchy --only codex
+clifleet upgrade --apply --hosts omarchy --only codex
+```
+
+`--hosts` picks machines. `--only` narrows tools and cannot add a name the host allowlist or blocklist already excluded. Neither flag installs a missing CLI.
 
 ## Commands
 

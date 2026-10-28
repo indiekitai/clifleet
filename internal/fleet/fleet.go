@@ -30,6 +30,11 @@ const (
 	StApplied     = "applied"
 )
 
+// StatusBudget is the per-host cap for status when the fleet file does not
+// set timeout and the CLI does not pass --timeout. A probe should not sit
+// for the upgrade budget. Upgrade, fetch, and apply keep DefaultTimeout.
+const StatusBudget = 45 * time.Second
+
 // Phases of clifleet upgrade. The default is one shot. Fetch only downloads.
 // Apply replaces binaries from the cache fetch wrote.
 const (
@@ -221,6 +226,8 @@ func runFleet(ctx context.Context, cfg config.Loaded, opt Options, run runner.Ru
 	timeout := cfg.Timeout
 	if opt.Timeout > 0 {
 		timeout = opt.Timeout
+	} else if !upgrade && !cfg.TimeoutExplicit && timeout > StatusBudget {
+		timeout = StatusBudget
 	}
 
 	command := "status"
@@ -289,7 +296,11 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 		tools[i] = probe.Tool{Name: specs[i].Name, Binary: specs[i].Binary}
 	}
 
-	progress(opt, "→ %s", host.Name)
+	if timeout > 0 {
+		progress(opt, "→ %s (%s)", host.Name, timeout.Round(time.Second))
+	} else {
+		progress(opt, "→ %s", host.Name)
+	}
 	script, err := probe.ProbeScript(tools, host.PathExtra)
 	if err != nil {
 		progress(opt, "✗ %s  %s", host.Name, err.Error())
@@ -504,8 +515,12 @@ func failedRow(name string, p plan, detail string) Row {
 
 func unreachable(h config.Host, names []string, msg string) HostResult {
 	out := hostError(h, msg)
+	short := firstLine(msg)
+	if len(short) > 100 {
+		short = short[:100] + "…"
+	}
 	for _, name := range names {
-		out.Rows = append(out.Rows, Row{Tool: name, Status: StUnreachable, Failed: true})
+		out.Rows = append(out.Rows, Row{Tool: name, Status: StUnreachable, Detail: short, Failed: true})
 	}
 	return out
 }
@@ -567,7 +582,7 @@ func (r Report) Lines() [][]string {
 				if row.Detail != "" {
 					status = "dry-run: " + row.Detail
 				}
-			case StSkipped, StFailed, StNoStage, StStaged, StApplied:
+			case StSkipped, StFailed, StNoStage, StStaged, StApplied, StUnreachable:
 				if row.Detail != "" {
 					status = row.Status + " (" + row.Detail + ")"
 				}
