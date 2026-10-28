@@ -1,0 +1,11 @@
+/clifleet
+/bin/
+/agent-tools/
+/dist/
+*.exe
+*.test
+*.out
+coverage.out
+.DS_Store
+*.swp
+/vendor/
