@@ -342,6 +342,10 @@ The default catalog follows those upgrade/status peers where their commands matc
 | [CC Switch](https://ccswitch.io/) | Name list only (Claude, Codex, Gemini, Grok, OpenCode, OpenClaw, Hermes, Pi, MiniMax, Kimi, Antigravity, and others). Install hints are not copied. |
 | [Magpie](https://usemagpie.co/) | Long-tail awareness only. Those names stay a user `[[recipe]]`. |
 
+## Agent skill
+
+[`skills/clifleet/SKILL.md`](skills/clifleet/SKILL.md) tells a coding agent how to run clifleet on your fleet: `status` and `--dry-run` first, ask before a real upgrade, `--fetch` then `--apply`, read `last-report.json`, and do not work around `not installed` or `managed by mise`. Copy or link the directory into your agent's skills folder, for example `ln -s "$PWD/skills/clifleet" ~/.claude/skills/clifleet`. A test fails if the skill names a command or flag that `--help` does not have.
+
 ## Development
 
 ```bash

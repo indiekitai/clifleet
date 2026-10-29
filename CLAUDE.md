@@ -37,6 +37,8 @@ Release builds stamp `internal/cli.Version` via `-ldflags -X github.com/indiekit
 
 `internal/selfupdate` (behind `clifleet update`, alias `self-update`; `upgrade` is the fleet command) and `install.sh` only ever replace clifleet's own binary: SHA256SUMS must match, a logged-in `gh` must confirm the build attestation (`release.yml` signs every tarball and SHA256SUMS), and the new binary must print `clifleet <tag>` before the rename. Workflow actions are pinned to commit SHAs; keep them pinned when bumping. Its tests run against `httptest`, a fake `curl` and a fake `gh` (`TestMain` hides the real one); a CLI test must point `selfPath` at a temp file, or it would overwrite the test binary.
 
+`skills/clifleet/SKILL.md` is the agent-facing usage guide. `TestSkillNamesOnlyRealCommandsAndFlags` (`internal/cli/skill_test.go`) fails when it names a command missing from the root help or a flag missing from that command's `--help`; when you rename or drop a flag, update the skill in the same commit. `upgrade` runs that are not `--dry-run` append to `history.jsonl` next to `last-report.json` (`internal/cli/history.go`, read by `clifleet history`).
+
 ## Architecture
 
 Data flow: `cmd/clifleet` → `cli` (flags, subcommands, table/JSON output, `last-report.json`) → `fleet` (per-host fan-out with a semaphore) → `probe` (builds POSIX sh scripts, parses their stdout) → `runner` (pipes the script into `sh -s` locally or `ssh … sh -s`). `catalog` is the pure decision layer; `config` loads `hosts.toml`.
