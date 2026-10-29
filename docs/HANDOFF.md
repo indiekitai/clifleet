@@ -31,6 +31,8 @@ Checked against `origin/main` on 2026-10-29 (Asia/Tokyo). Tip SHA, PR #2–#4 su
   - `2d1be27` shell: whole-process-tree kill on caps, stalled-download cutoff, mawk-safe checksum, tab/newline paths, npm bin-link rollback
   - `4ea23b5` catalog: Volta and mise/asdf `installs/` are managed, whole-segment npm package match, custom `native` recipes are not staged
   - `3202b4e` + tag **`v0.2.0`**: `install.sh`, `clifleet update` (alias `self-update`), `SHA256SUMS` in releases, version from build info
+  - `cb11ca0`: every recursive delete in remote scripts goes through `cf_rmtree`, which refuses empty, relative, `.`/`..`, `/`, `$HOME` and its parents (`TestShellDeletesTreesOnlyThroughRmtree` guards it)
+  - `be8527c` + tag **`v0.2.1`**: release runs the tests first, Actions pinned to commit SHAs, build provenance attestation on the tarballs and `SHA256SUMS`; `install.sh` and `clifleet update` run `gh attestation verify` when gh is logged in (`CLIFLEET_NO_ATTESTATION=1` skips). Verified end to end 2026-10-29: release green, attestation verifies, install.sh and a real v0.2.0 → v0.2.1 update on Mac Studio
   - Before that: Ctrl-C is reported as `interrupted`, not `unreachable`; the kill-tree KILL trusts only PID+start time (BusyBox without `lstart` KILLs only a direct child that is still the watchdog's sibling); npm aliases keep their real package name; a staged run hit by Ctrl-C sets a host error, so it never exits 0
 - `1cad8412` — squash-merge of **PR #4** (*Harden staged apply against mise shims, keychain rollbacks, and summary counts*)
 - Prior merges worth knowing:
@@ -42,7 +44,7 @@ Open PRs: none at handoff time.
 
 ## Install on Fan's control machine (Mac Studio)
 
-- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.0`, installed 2026-10-29 with `install.sh` into `~/go/bin`)
+- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.1`, updated 2026-10-29 with `clifleet update`)
 - Config: `~/.config/clifleet/hosts.toml` (timeout currently **`10m`**, concurrency `4`)
 - Cache / durable last run: `~/.cache/clifleet/last-report.json` plus `npm/`, `release/`, `staged/`
 - Control machine id for Cursor local tools: `4115756c-6089-4706-ab99-39b456da5650` (label Mac-Studio.local)
@@ -133,13 +135,21 @@ Always `set -o pipefail` if piping through `tee`. Read `last-report.json` after 
 - Do not start a long fleet fetch/apply without Fan's timing confirmation.
 - Do not silently end a maintenance batch.
 
+## Backlog (decided 2026-10-29, not started)
+
+From comparing with Mole (`docs/reviews/2026-10-29-参考-Mole.md`, local only). Done: rm guard (`cf_rmtree`), release hardening (v0.2.1). Next, in order:
+
+1. Agent skill for clifleet: a SKILL.md that says `status` / `--dry-run` first, confirm timing with Fan before a real upgrade, prefer `--fetch` then `--apply`, read `last-report.json`; plus a test that every command and flag it names exists in `--help`.
+2. Upgrade history: append-only log of each upgrade run per host/tool, and `clifleet history [--json] [--limit N]`.
+3. Maybe: a passive "newer clifleet available" notice, and a release-check script.
+
 ## Suggested first week for the next maintainer
 
 1. Read `README.md` (staged upgrades + timeout semantics) and this file.
 2. `clifleet doctor` + `clifleet status` from Mac Studio; confirm SSH to mbp/omarchy/claw1.
 3. Decide with Fan: **longer timeout refetch** vs **host-side Xcode / keychain / mise / Node**.
 4. Only after timing OK, refetch the lagging hosts/tools, then apply.
-5. Optionally cut a real `v0.1.1` (or `v0.2.0`). Release binaries pick up that tag through the existing ldflags. `go install` of a raw commit keeps printing `0.1.0` until `internal/cli.Version` changes.
+5. New releases: push a `v*` tag; `clifleet update` on each machine picks it up.
 
 ## Contact / ownership note
 
