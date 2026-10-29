@@ -30,7 +30,8 @@ Checked against `origin/main` on 2026-10-29 (Asia/Tokyo). Tip SHA, PR #2–#4 su
   - `1bce61c` orchestration: ssh `--` and dash-destination rejection, duplicate-host rejection, doctor deadline, short-budget caps, partial-output salvage for apply / one-shot
   - `2d1be27` shell: whole-process-tree kill on caps, stalled-download cutoff, mawk-safe checksum, tab/newline paths, npm bin-link rollback
   - `4ea23b5` catalog: Volta and mise/asdf `installs/` are managed, whole-segment npm package match, custom `native` recipes are not staged
-  - Then: Ctrl-C is reported as `interrupted`, not `unreachable`; the kill-tree KILL trusts only PID+start time (BusyBox without `lstart` KILLs only a direct child that is still the watchdog's sibling); npm aliases keep their real package name; a staged run hit by Ctrl-C sets a host error, so it never exits 0
+  - `3202b4e` + tag **`v0.2.0`**: `install.sh`, `clifleet update` (alias `self-update`), `SHA256SUMS` in releases, version from build info
+  - Before that: Ctrl-C is reported as `interrupted`, not `unreachable`; the kill-tree KILL trusts only PID+start time (BusyBox without `lstart` KILLs only a direct child that is still the watchdog's sibling); npm aliases keep their real package name; a staged run hit by Ctrl-C sets a host error, so it never exits 0
 - `1cad8412` — squash-merge of **PR #4** (*Harden staged apply against mise shims, keychain rollbacks, and summary counts*)
 - Prior merges worth knowing:
   - **PR #3** `b35f40c8` — staged upgrade is the default path (npm atomic temp-prefix apply, brew PATH / `shellenv`, native stage budget, engines preflight)
@@ -41,18 +42,15 @@ Open PRs: none at handoff time.
 
 ## Install on Fan's control machine (Mac Studio)
 
-- Binary: `/Users/tf/go/bin/clifleet` (reports `clifleet 0.1.0`; built from `1cad8412` on 2026-10-29 ~11:23 JST)
+- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.0`, installed 2026-10-29 with `install.sh` into `~/go/bin`)
 - Config: `~/.config/clifleet/hosts.toml` (timeout currently **`10m`**, concurrency `4`)
 - Cache / durable last run: `~/.cache/clifleet/last-report.json` plus `npm/`, `release/`, `staged/`
 - Control machine id for Cursor local tools: `4115756c-6089-4706-ab99-39b456da5650` (label Mac-Studio.local)
-- Reinstall from tip:
+- Upgrade to the newest release: `clifleet update` (`--check` first if unsure). It only replaces clifleet itself; `upgrade` is the fleet command. Releases are cut by pushing a `v*` tag; `release.yml` publishes the four tarballs plus `SHA256SUMS`, which `update` and `install.sh` require.
+- Fresh machine, no Go: `curl -fsSL https://raw.githubusercontent.com/indiekitai/clifleet/main/install.sh | sh` (add `CLIFLEET_INSTALL_DIR=$HOME/go/bin` to keep this machine's path).
+- Untagged tip: `go install github.com/indiekitai/clifleet/cmd/clifleet@main` (reports a Go pseudo-version; `update` then moves it to the next release).
 
-```bash
-go install github.com/indiekitai/clifleet/cmd/clifleet@1cad8412
-# or @latest after the next tag
-```
-
-The binary above is older than `main`; reinstall with `go install github.com/indiekitai/clifleet/cmd/clifleet@main` before the next real run. A working clone now lives at `/Users/tf/Documents/Fansen/clifleet`.
+A working clone now lives at `/Users/tf/Documents/Fansen/clifleet`.
 
 ## Fleet (`hosts.toml`)
 
@@ -106,7 +104,6 @@ PR #4 diagnostics that did help: `keychain locked` surfaces; mise shows in `vers
 | mbp login keychain locked over SSH | Host | agent/`cursor-agent` version probe / some applies painful | Unlock keychain on mbp (or run apply from an unlocked GUI session) |
 | omarchy codex behind mise | Host / policy | clifleet correctly **refuses** to replace the mise binary | `mise upgrade codex` (or install a real standalone and stop using the shim) |
 | claw1 openclaw Node engines too old | Host | fetch `blocked (needs Node …)` | Upgrade Node on claw1; clifleet will not bump Node |
-| `go install` of an untagged commit still prints `0.1.0` | Product | Confusing “am I on tip?” | Release builds already stamp `${GITHUB_REF_NAME}`. Cut `v0.1.1` or `v0.2.0` for those binaries, and bump `internal/cli.Version` if `go install @<sha>` should match tip |
 | No local Fansen checkout | Ops | Agents may look in the wrong place | Prefer GitHub + `go install`; optional clone only if Fan asks |
 
 ## Safe command cheat sheet
