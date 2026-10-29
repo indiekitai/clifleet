@@ -155,7 +155,7 @@ ssh = "box"
 tools = ["claude", "codex", "cursor", "opencode"]
 `)
 	probe := probeOut(
-		present("claude", "/home/a/.local/bin/claude", "/home/a/.local/bin/claude", "2.1.40"),
+		present("claude", "/home/a/.local/bin/claude", "/home/a/.local/share/claude/versions/2.1.40", "2.1.40"),
 		withPkg(present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "0.163.0"), "@openai/codex"),
 		present("cursor", "/usr/local/bin/cursor", "/Applications/Cursor.app/Contents/Resources/app/bin/cursor", "3.0.0"),
 		withBrew(present("opencode", "/opt/homebrew/bin/opencode", "/opt/homebrew/Cellar/opencode/1.2.3/bin/opencode", "1.2.3"), "formula", "opencode"),

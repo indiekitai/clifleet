@@ -76,6 +76,15 @@ var loginPathDirs = []string{
 	`"$HOME/.linuxbrew/bin"`,
 }
 
+// brewFallbacks are absolute brew paths tried when brew is not on PATH.
+// Tests replace this and loginPathDirs so a script run on a developer
+// machine cannot reach the real Homebrew prefix.
+var brewFallbacks = []string{
+	`/opt/homebrew/bin/brew`,
+	`/usr/local/bin/brew`,
+	`/home/linuxbrew/.linuxbrew/bin/brew`,
+}
+
 // shimPathDirs are version-manager shims. They are appended after the real
 // prefixes so a mise or asdf shim cannot shadow ~/.local/bin. A shim that
 // is still the command we find is left alone; it is not the install target.
@@ -191,6 +200,13 @@ resolve() {
     esac
     i=$((i + 1))
   done
+  case $target in
+    */../*|*/./*)
+      # A relative link leaves ../ behind. Resolve the directory physically so
+      # install-layout checks see where the file really is.
+      cf_rs_dir=$(cd -P "$(dirname "$target")" 2>/dev/null && pwd -P) && target=$cf_rs_dir/$(basename "$target")
+      ;;
+  esac
   printf '%s\n' "$target"
 }
 
@@ -379,8 +395,9 @@ func scriptBody(extraPaths []string) (string, error) {
 	if err := writePathFn(&b, "cf_ensure_path", "append_missing", extraPaths); err != nil {
 		return "", err
 	}
+	writeExtraFirstFn(&b, extraPaths)
 	b.WriteString(scriptFns)
-	b.WriteString(brewEnvSnippet)
+	b.WriteString(strings.Replace(brewEnvSnippet, "BREW_FALLBACKS", strings.Join(brewFallbacks, " "), 1))
 	b.WriteString(nvmSnippet)
 	return b.String(), nil
 }
@@ -405,6 +422,18 @@ func writePathFn(b *strings.Builder, name, helper string, extra []string) error 
 	return nil
 }
 
+// writeExtraFirstFn writes cf_extra_first, which puts path_extra back at the
+// front of PATH. brew shellenv and nvm prepend their own directories, so without
+// this /opt/homebrew/bin would shadow a path_extra binary the host asked for.
+// Callers validated the entries in writePathFn.
+func writeExtraFirstFn(b *strings.Builder, extra []string) {
+	b.WriteString("cf_extra_first() {\n  :\n")
+	for _, p := range extra {
+		fmt.Fprintf(b, "  prepend %s\n", shellquote.Quote(p))
+	}
+	b.WriteString("}\n")
+}
+
 // brewEnvSnippet is the non-interactive equivalent of a login shell's
 // eval "$(brew shellenv)". Absolute paths are checked first because ssh -T
 // starts with PATH=/usr/bin:/bin:/usr/sbin:/sbin. Output is capped so a stuck
@@ -417,13 +446,12 @@ cf_brew_env() {
   brewbin=
   if command -v brew >/dev/null 2>&1; then
     brewbin=$(command -v brew)
-  elif [ -x /opt/homebrew/bin/brew ]; then
-    brewbin=/opt/homebrew/bin/brew
-  elif [ -x /usr/local/bin/brew ]; then
-    brewbin=/usr/local/bin/brew
-  elif [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
-    brewbin=/home/linuxbrew/.linuxbrew/bin/brew
   fi
+  for b in BREW_FALLBACKS; do
+    if [ -z "$brewbin" ] && [ -x "$b" ]; then
+      brewbin=$b
+    fi
+  done
   if [ -z "$brewbin" ]; then
     return 0
   fi
@@ -464,6 +492,7 @@ cf_brew_env
 # afterwards so a login-style brew prefix cannot drop ~/.linuxbrew or
 # /opt/homebrew, and a wiped nvm PATH cannot drop brew.
 cf_ensure_path
+cf_extra_first
 hash -r 2>/dev/null || true
 export PATH
 `

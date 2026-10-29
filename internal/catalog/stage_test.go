@@ -68,7 +68,7 @@ func TestPlanStageNoStageAndSkips(t *testing.T) {
 	if !strings.Contains(native.Fetch.Display, "https://releases.openai.com/codex/releases/") || !strings.Contains(native.Fetch.Display, "codex-package-") {
 		t.Fatalf("codex fetch %q", native.Fetch.Display)
 	}
-	claude := PlanStage(Resolve("claude", nil), present("claude", "/home/a/.local/bin/claude", "/home/a/.local/bin/claude", "2.1.44"), "")
+	claude := PlanStage(Resolve("claude", nil), present("claude", "/home/a/.local/bin/claude", "/home/a/.local/share/claude/versions/2.1.44", "2.1.44"), "")
 	if claude.Action != ActionStage || claude.Kind != KindRelease || claude.Release != "claude" {
 		t.Fatalf("claude native %+v", claude)
 	}
@@ -130,9 +130,11 @@ func TestPlanStageNoStageAndSkips(t *testing.T) {
 		t.Fatalf("yarn %+v", yarn)
 	}
 
-	opencode := PlanStage(Resolve("opencode", nil), present("opencode", "/home/a/.local/bin/opencode", "/home/a/.local/bin/opencode", "1.0.0"), "")
-	if opencode.Action != ActionStage || opencode.Release != "opencode" || !strings.Contains(opencode.Fetch.Display, "opencode.ai/update/api/latest/cli/npm") {
-		t.Fatalf("native opencode should stage from the npm channel: %+v", opencode)
+	// The install script's ~/.opencode/bin copy has no stageable artifact.
+	// Staging from npm would add a second install under npm root -g.
+	opencode := PlanStage(Resolve("opencode", nil), present("opencode", "/home/a/.opencode/bin/opencode", "/home/a/.opencode/bin/opencode", "1.0.0"), "")
+	if opencode.Action != ActionNoStage || opencode.Fetch != nil {
+		t.Fatalf("native opencode must stay no-stage: %+v", opencode)
 	}
 }
 
@@ -168,8 +170,39 @@ func TestPlanStageRespectsMethodOverride(t *testing.T) {
 		present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "0.1.0"),
 		"@openai/codex",
 	), "native")
-	if back.Action != ActionStage || back.Kind != KindRelease || back.Release != "codex" {
-		t.Fatalf("override native should stage the Codex release %+v", back)
+	// The override picks the native updater, but the binary on disk is an
+	// npm install. Staging the release would overwrite node_modules, so it
+	// stays no-stage and --one-shot runs codex update.
+	if back.Action != ActionNoStage || back.Kind == KindRelease {
+		t.Fatalf("override native must not stage a release over an npm install %+v", back)
+	}
+}
+
+// A release is staged only for the vendor's install layout. apply replaces
+// the real file the probe found, so a same-named binary must not qualify.
+func TestNativeReleaseNeedsVendorLayout(t *testing.T) {
+	cases := []struct {
+		name, path, real string
+	}{
+		{"agent", "/usr/local/bin/agent", "/usr/local/bin/agent"},
+		{"agent", "/home/a/bin/agent", "/opt/other/agent/bin/agent"},
+		{"cursor-agent", "/home/a/.local/bin/cursor-agent", "/home/a/.local/bin/cursor-agent"},
+		{"claude", "/home/a/bin/claude", "/home/a/bin/claude"},
+		{"claude", "/home/a/.local/bin/claude", "/home/a/.local/bin/claude"},
+		{"codex", "/home/a/bin/codex", "/home/a/bin/codex"},
+		{"opencode", "/home/a/.opencode/bin/opencode", "/home/a/.opencode/bin/opencode"},
+		{"opencode", "/home/a/.local/bin/opencode", "/home/a/.local/bin/opencode"},
+	}
+	for _, c := range cases {
+		got := PlanStage(Resolve(c.name, nil), present(c.name, c.path, c.real, "1.0.0"), "")
+		if got.Action == ActionStage || got.Kind == KindRelease || got.Fetch != nil || got.Apply != nil {
+			t.Errorf("%s at %s must not stage a release: %+v", c.name, c.real, got)
+		}
+	}
+	// A relative installer link still lands in the vendor layout.
+	rel := PlanStage(Resolve("claude", nil), present("claude", "/home/a/.local/bin/claude", "/home/a/.local/bin/../share/claude/versions/2.1.0", "2.1.0"), "")
+	if rel.Kind != KindRelease {
+		t.Errorf("relative claude link must stage a release: %+v", rel)
 	}
 }
 

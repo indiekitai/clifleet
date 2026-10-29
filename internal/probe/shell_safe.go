@@ -199,18 +199,45 @@ cf_codex_npm_platform() {
   esac
 }
 
+# cf_restore_labeled DEST LABEL puts .clifleet-LABEL-prev back at DEST.
+# Its variables are prefixed: callers keep their own dest/prev, and rolling
+# back the platform package must not retarget the main package's rollback.
 cf_restore_labeled() {
-  dest=$1
-  label=$2
-  parent=$(dirname "$dest")
-  prev=$parent/.clifleet-$label-prev
-  if [ -d "$prev" ]; then
-    failed=$parent/.clifleet-$label-failed
-    rm -rf "$failed"
-    mv "$dest" "$failed" 2>/dev/null || true
-    mv "$prev" "$dest" || true
-    rm -rf "$failed"
+  cf_rl_dest=$1
+  cf_rl_parent=$(dirname "$cf_rl_dest")
+  cf_rl_prev=$cf_rl_parent/.clifleet-$2-prev
+  if [ -d "$cf_rl_prev" ]; then
+    cf_rl_failed=$cf_rl_parent/.clifleet-$2-failed
+    rm -rf "$cf_rl_failed"
+    mv "$cf_rl_dest" "$cf_rl_failed" 2>/dev/null || true
+    if [ -e "$cf_rl_dest" ] || [ -L "$cf_rl_dest" ]; then
+      # mv would nest prev inside the failed package instead of replacing it.
+      return 1
+    fi
+    mv "$cf_rl_prev" "$cf_rl_dest" || return 1
+    rm -rf "$cf_rl_failed"
   fi
+}
+
+# cf_swap_undo DEST LABEL EXISTED rolls DEST back after cf_swap_err is set.
+# EXISTED is empty when this apply created DEST; it is removed rather than
+# left behind as a new install. Otherwise .clifleet-LABEL-prev must be there
+# and go back. A rollback that does not happen is appended to cf_swap_err,
+# never reported as a clean one.
+cf_swap_undo() {
+  cf_su_prev=$(dirname "$1")/.clifleet-$2-prev
+  if [ -z "$3" ]; then
+    rm -rf "$1"
+    if [ ! -e "$1" ] && [ ! -L "$1" ]; then
+      return 0
+    fi
+    cf_swap_err="$cf_swap_err; rollback failed, could not remove new package $1"
+  elif [ -d "$cf_su_prev" ] && cf_restore_labeled "$1" "$2"; then
+    return 0
+  else
+    cf_swap_err="$cf_swap_err; rollback failed, previous package not at $cf_su_prev"
+  fi
+  cf_swap_rb_failed=1
 }
 
 cf_semver_line() {
@@ -284,16 +311,31 @@ cf_stamp_field() {
   printf '%s\n' "$1" | awk -F '\t' -v n="$2" '{print $n}'
 }
 
+# cf_atomic_replace DEST SRC. Variables are prefixed so a caller's dest/tmp
+# survive the call.
 cf_atomic_replace() {
-  dest=$1
-  src=$2
-  dir=$(dirname "$dest")
-  base=$(basename "$dest")
-  tmp="$dir/.clifleet-${base}-new"
-  rm -f "$tmp"
-  cp "$src" "$tmp" || return 1
-  chmod 755 "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
+  cf_ar_tmp="$(dirname "$1")/.clifleet-$(basename "$1")-new"
+  rm -f "$cf_ar_tmp"
+  cp "$2" "$cf_ar_tmp" || return 1
+  chmod 755 "$cf_ar_tmp" || { rm -f "$cf_ar_tmp"; return 1; }
+  mv -f "$cf_ar_tmp" "$1" || { rm -f "$cf_ar_tmp"; return 1; }
+}
+
+# cf_relink_back LINK PREV points LINK back at PREV after a failed release
+# swap. A link that cannot be put back is added to cf_rb_failed so the
+# report never claims a rollback that did not happen.
+cf_relink_back() {
+  [ -n "$2" ] || return 0
+  cf_atomic_link "$1" "$2" || cf_rb_failed="$cf_rb_failed $1"
+}
+
+# cf_rb_detail describes the rollback after cf_relink_back calls.
+cf_rb_detail() {
+  if [ -n "$cf_rb_failed" ]; then
+    printf 'rollback failed, still pointing at the new release:%s\n' "$cf_rb_failed"
+  else
+    printf 'previous release restored\n'
+  fi
 }
 
 cf_atomic_link() {
@@ -359,10 +401,12 @@ cf_refuse_manager() {
 }
 
 # cf_confirm_live SECONDS LIVE WANT KIND
-# KIND is "cursor" or "semver". Sets cf_confirm to match, mismatch,
+# KIND is "cursor" or "semver". Sets cf_confirm to match, mismatch, broken,
 # soft-keychain, soft-timeout, or soft-empty. A missing version is soft:
 # keychain noise and a slow --version must not undo a swap that already
-# landed. A different version token is a hard mismatch.
+# landed. A different version token is a hard mismatch. A binary the shell
+# cannot execute (126/127) or that dies on a signal is broken; cf_confirm_got
+# is then the exit status.
 cf_confirm_live() {
   secs=$1
   live=$2
@@ -384,6 +428,19 @@ cf_confirm_live() {
       tok=$(cf_semver_line "$line")
       ;;
   esac
+  blob=$(cat "$out" "$err" 2>/dev/null || true)
+  low=$(printf '%s\n' "$blob" | tr 'A-Z' 'a-z')
+  cf_cl_keychain=
+  case $low in
+    *'keychain is locked'*|*'login keychain'*) cf_cl_keychain=1 ;;
+  esac
+  # A binary that prints the right version and then dies is still broken.
+  # cf_cap_both reports its own deadline as 124, never as a signal.
+  if [ -z "$cf_cl_keychain" ] && { [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || [ "$rc" -gt 128 ]; }; then
+    cf_confirm=broken
+    cf_confirm_got=$rc
+    return 0
+  fi
   if [ -n "$tok" ] && [ "$tok" = "$want" ]; then
     cf_confirm=match
     cf_confirm_got=$tok
@@ -394,19 +451,24 @@ cf_confirm_live() {
     cf_confirm_got=$tok
     return 0
   fi
-  blob=$(cat "$out" "$err" 2>/dev/null || true)
-  low=$(printf '%s\n' "$blob" | tr 'A-Z' 'a-z')
-  case $low in
-    *'keychain is locked'*|*'login keychain'*)
-      cf_confirm=soft-keychain
-      return 0
-      ;;
-  esac
+  if [ -n "$cf_cl_keychain" ]; then
+    cf_confirm=soft-keychain
+    return 0
+  fi
   if [ "$rc" -eq 124 ]; then
     cf_confirm=soft-timeout
     return 0
   fi
   cf_confirm=soft-empty
+}
+
+# cf_confirm_reason WANT describes a mismatch or broken cf_confirm_live result.
+cf_confirm_reason() {
+  if [ "$cf_confirm" = broken ]; then
+    printf 'did not run (exit %s)\n' "$cf_confirm_got"
+  else
+    printf 'reported %s, want %s\n' "$cf_confirm_got" "$1"
+  fi
 }
 
 cf_download() {
@@ -417,7 +479,6 @@ cf_download() {
     https://github.com/openai/codex/releases/download/rust-v[0-9]*.[0-9]*.[0-9]*/codex-package-*.tar.gz) ;;
     https://releases.openai.com/codex/channels/latest) ;;
     https://releases.openai.com/codex/releases/[0-9]*.[0-9]*.[0-9]*/codex-package-*.tar.gz) ;;
-    https://opencode.ai/update/api/latest/cli/npm) ;;
     https://downloads.claude.ai/claude-code-releases/latest) ;;
     https://downloads.claude.ai/claude-code-releases/[0-9]*.[0-9]*.[0-9]*/manifest.json) ;;
     https://downloads.claude.ai/claude-code-releases/[0-9]*.[0-9]*.[0-9]*/manifest.json.sig) ;;
@@ -531,6 +592,8 @@ cf_npm_swap() {
   tarball=$3
   plat_tarball=$4
   cf_swap_err=
+  cf_sw_main_existed=
+  cf_sw_plat_existed=
   prefix=$cf_dir/npm-prefix
   rm -rf "$prefix"
   mkdir -p "$prefix" || { cf_swap_err="could not create temp prefix"; return 1; }
@@ -573,6 +636,7 @@ cf_npm_swap() {
   rm -rf "$stage"
   cp -a "$src" "$stage" || { cf_swap_err="could not stage package on the install filesystem"; return 1; }
   if [ -e "$dest" ] || [ -L "$dest" ]; then
+    cf_sw_main_existed=1
     rm -rf "$prev"
     if ! mv "$dest" "$prev"; then
       rm -rf "$stage"
@@ -581,10 +645,10 @@ cf_npm_swap() {
     fi
   fi
   if ! mv "$stage" "$dest"; then
-    if [ -d "$prev" ] && [ ! -e "$dest" ]; then
-      mv "$prev" "$dest" || true
-    fi
     cf_swap_err="could not swap staged package into place"
+    if [ -d "$prev" ] && [ ! -e "$dest" ]; then
+      mv "$prev" "$dest" || cf_swap_err="$cf_swap_err; rollback failed, previous package left at $prev"
+    fi
     return 1
   fi
   plat_dest=
@@ -597,30 +661,31 @@ cf_npm_swap() {
     if [ -n "$plat_name" ] && [ -d "$psrc" ]; then
       plat_dest=$live_root/$plat_name
       pparent=$(dirname "$plat_dest")
-      mkdir -p "$pparent" || { cf_swap_err="could not create platform dir"; cf_restore_labeled "$dest" "$tool"; return 1; }
+      mkdir -p "$pparent" || { cf_swap_err="could not create platform dir"; cf_swap_undo "$dest" "$tool" "$cf_sw_main_existed"; return 1; }
       pstage=$pparent/.clifleet-plat-new
       pprev=$pparent/.clifleet-plat-prev
       rm -rf "$pstage"
       if ! cp -a "$psrc" "$pstage"; then
         cf_swap_err="could not stage platform package"
-        cf_restore_labeled "$dest" "$tool"
+        cf_swap_undo "$dest" "$tool" "$cf_sw_main_existed"
         return 1
       fi
       if [ -e "$plat_dest" ] || [ -L "$plat_dest" ]; then
+        cf_sw_plat_existed=1
         rm -rf "$pprev"
         if ! mv "$plat_dest" "$pprev"; then
           rm -rf "$pstage"
           cf_swap_err="could not move platform package aside"
-          cf_restore_labeled "$dest" "$tool"
+          cf_swap_undo "$dest" "$tool" "$cf_sw_main_existed"
           return 1
         fi
       fi
       if ! mv "$pstage" "$plat_dest"; then
-        if [ -d "$pprev" ] && [ ! -e "$plat_dest" ]; then
-          mv "$pprev" "$plat_dest" || true
-        fi
         cf_swap_err="could not swap platform package"
-        cf_restore_labeled "$dest" "$tool"
+        if [ -d "$pprev" ] && [ ! -e "$plat_dest" ]; then
+          mv "$pprev" "$plat_dest" || cf_swap_err="$cf_swap_err; rollback failed, previous package left at $pprev"
+        fi
+        cf_swap_undo "$dest" "$tool" "$cf_sw_main_existed"
         return 1
       fi
     fi
@@ -632,11 +697,15 @@ cf_npm_swap() {
   fi
   if [ -n "$check" ]; then
     if ! cf_cap 10 "$cf_dir/checkver" "$check" --version; then
+      cf_swap_err="new package did not run"
+      cf_swap_rb_failed=
       if [ -n "$plat_dest" ]; then
-        cf_restore_labeled "$plat_dest" plat
+        cf_swap_undo "$plat_dest" plat "$cf_sw_plat_existed"
       fi
-      cf_restore_labeled "$dest" "$tool"
-      cf_swap_err="new package did not run; previous install restored"
+      cf_swap_undo "$dest" "$tool" "$cf_sw_main_existed"
+      if [ -z "$cf_swap_rb_failed" ]; then
+        cf_swap_err="$cf_swap_err; previous install restored"
+      fi
       return 1
     fi
   fi
@@ -854,10 +923,6 @@ stage_release_codex() {
   cf_report fetch "$tool" 0 "$dest/$asset"
 }
 
-apply_release_opencode() {
-  apply_npm "$1"
-}
-
 stage_release_claude() {
   tool=$1
   root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
@@ -1047,29 +1112,46 @@ apply_release_codex() {
   case $staged_ver in
     *[!0-9A-Za-z._-]*) cf_report apply "$tool" 1 "refusing Codex version"; return 0 ;;
   esac
-  real=
-  if [ -n "$live" ]; then
-    real=$(resolve "$live")
+  if [ -z "$live" ]; then
+    cf_report apply "$tool" 1 "codex is not on PATH"
+    return 0
   fi
+  real=$(resolve "$live")
   root=$(cf_standalone_root "$real" || true)
-  if [ -n "$root" ]; then
-    target=$(cf_codex_target) || { cf_report apply "$tool" 1 "no Codex target for this host"; return 0; }
-    rel="$root/releases"
+  # Only the standalone installer's layout is ours to rewrite. Any other codex
+  # (npm, Homebrew, a wrapper) is whatever the probe found under that name.
+  if [ -z "$root" ]; then
+    cf_report apply "$tool" blocked "not a standalone Codex install: $real"
+    return 0
+  fi
+  target=$(cf_codex_target) || { cf_report apply "$tool" 1 "no Codex target for this host"; return 0; }
+  rel="$root/releases"
+  name="$staged_ver-$target"
+  dest="$rel/$name"
+  cur=$(resolve "$root/current" 2>/dev/null || true)
+  # The live binary may already run from dest (a version check that printed
+  # nothing). Rewriting dest would delete the only copy that works.
+  case $real in
+    "$dest"/*) cf_report apply "$tool" current "already on $staged_ver"; return 0 ;;
+  esac
+  if [ "$cur" = "$dest" ]; then
+    case $real in
+      "$root/current"/*) cf_report apply "$tool" current "up to date"; return 0 ;;
+    esac
+    # current already holds this release but the PATH link still points at an
+    # older one. Keep dest as it is and only move the link.
+    if [ ! -L "$live" ]; then
+      cf_report apply "$tool" 1 "codex on PATH bypasses the current link: $live"
+      return 0
+    fi
+  else
     mkdir -p "$rel" || { cf_report apply "$tool" 1 "could not create Codex releases dir"; return 0; }
-    name="$staged_ver-$target"
-    dest="$rel/$name"
     stage="$rel/.staging.$$"
     rm -rf "$stage"
     mkdir -p "$stage" || { cf_report apply "$tool" 1 "could not stage Codex release"; return 0; }
     cp -a "$extract"/. "$stage"/ || { rm -rf "$stage"; cf_report apply "$tool" 1 "could not copy Codex release"; return 0; }
     if [ ! -e "$stage/codex" ]; then
       ln -sf bin/codex "$stage/codex"
-    fi
-    cur=$(resolve "$root/current" 2>/dev/null || true)
-    if [ "$cur" = "$dest" ]; then
-      rm -rf "$stage"
-      cf_report apply "$tool" current "up to date"
-      return 0
     fi
     if [ -e "$dest" ] || [ -L "$dest" ]; then
       rm -rf "$dest"
@@ -1079,24 +1161,36 @@ apply_release_codex() {
       cf_report apply "$tool" 1 "could not publish Codex release"
       return 0
     fi
-    if ! cf_atomic_link "$root/current" "$dest"; then
-      cf_report apply "$tool" 1 "could not switch Codex current link"
+  fi
+  prev_current=$(readlink "$root/current" 2>/dev/null || true)
+  prev_live=
+  if [ -L "$live" ]; then
+    prev_live=$(readlink "$live" || true)
+  fi
+  if [ "$cur" != "$dest" ] && ! cf_atomic_link "$root/current" "$dest"; then
+    cf_report apply "$tool" 1 "could not switch Codex current link"
+    return 0
+  fi
+  if [ -n "$prev_live" ]; then
+    cf_atomic_link "$live" "$root/current/bin/codex" || true
+  fi
+  cf_confirm_live 20 "$live" "$staged_ver" semver
+  case $cf_confirm in
+    mismatch|broken)
+      cf_rb_failed=
+      if [ "$cur" = "$dest" ]; then
+        : # current was not touched; only the PATH link moved.
+      elif [ -n "$prev_current" ]; then
+        cf_relink_back "$root/current" "$prev_current"
+      else
+        # There was no current link before this apply.
+        rm -f "$root/current" || cf_rb_failed="$cf_rb_failed $root/current"
+      fi
+      cf_relink_back "$live" "$prev_live"
+      cf_report apply "$tool" 1 "staged Codex $(cf_confirm_reason "$staged_ver"); $(cf_rb_detail)"
       return 0
-    fi
-    if [ -n "$live" ] && [ -L "$live" ]; then
-      cf_atomic_link "$live" "$root/current/bin/codex" || true
-    fi
-    cf_report apply "$tool" 0 "$archive"
-    return 0
-  fi
-  if [ -z "$real" ]; then
-    cf_report apply "$tool" 1 "codex is not on PATH"
-    return 0
-  fi
-  if ! cf_atomic_replace "$real" "$extract/bin/codex"; then
-    cf_report apply "$tool" 1 "could not replace Codex binary"
-    return 0
-  fi
+      ;;
+  esac
   cf_report apply "$tool" 0 "$archive"
 }
 
@@ -1127,6 +1221,24 @@ apply_release_claude() {
     cf_report apply "$tool" 1 "claude is not on PATH"
     return 0
   fi
+  # Only a link into the native installer's versions dir is ours to retarget.
+  real=$(resolve "$live")
+  case $real in
+    */.local/share/claude/versions/*) ;;
+    *) cf_report apply "$tool" blocked "not a native Claude install: $real"; return 0 ;;
+  esac
+  if [ ! -L "$live" ]; then
+    cf_report apply "$tool" blocked "claude on PATH is not a link into the versions dir: $live"
+    return 0
+  fi
+  case $real in
+    */.local/share/claude/versions/"$ver")
+      # The version check printed nothing, but the link already points here.
+      # Rewriting the file it runs from would leave nothing to roll back to.
+      cf_report apply "$tool" current "already linked to $ver"
+      return 0
+      ;;
+  esac
   live_ver=$(cf_cmd_semver "$live" --version)
   if [ -n "$live_ver" ] && [ "$live_ver" = "$ver" ]; then
     cf_report apply "$tool" current "up to date"
@@ -1140,30 +1252,20 @@ apply_release_claude() {
   cp "$archive" "$tmp" || { cf_report apply "$tool" 1 "could not copy Claude binary"; return 0; }
   chmod 755 "$tmp" || { rm -f "$tmp"; cf_report apply "$tool" 1 "could not mark Claude executable"; return 0; }
   mv -f "$tmp" "$dest" || { rm -f "$tmp"; cf_report apply "$tool" 1 "could not publish Claude version"; return 0; }
-  prev=
-  if [ -L "$live" ]; then
-    prev=$(readlink "$live" || true)
-    if ! cf_atomic_link "$live" "$dest"; then
-      cf_report apply "$tool" 1 "could not retarget claude symlink"
-      return 0
-    fi
-  else
-    real=$(resolve "$live")
-    if ! cf_atomic_replace "$real" "$dest"; then
-      cf_report apply "$tool" 1 "could not replace Claude binary"
-      return 0
-    fi
+  prev=$(readlink "$live") && [ -n "$prev" ] || { cf_report apply "$tool" 1 "could not read claude symlink"; return 0; }
+  if ! cf_atomic_link "$live" "$dest"; then
+    cf_report apply "$tool" 1 "could not retarget claude symlink"
+    return 0
   fi
   cf_confirm_live 20 "$live" "$ver" semver
   case $cf_confirm in
     match)
       cf_report apply "$tool" 0 "$dest"
       ;;
-    mismatch)
-      if [ -n "$prev" ]; then
-        cf_atomic_link "$live" "$prev" || true
-      fi
-      cf_report apply "$tool" 1 "staged Claude reported $cf_confirm_got, want $ver; previous binary restored"
+    mismatch|broken)
+      cf_rb_failed=
+      cf_relink_back "$live" "$prev"
+      cf_report apply "$tool" 1 "staged Claude $(cf_confirm_reason "$ver"); $(cf_rb_detail)"
       ;;
     soft-keychain)
       cf_report apply "$tool" 0 "installed $ver; version check skipped (macOS login keychain is locked)"
@@ -1209,6 +1311,24 @@ cf_apply_cursor_agent() {
     cf_report apply "$tool" 1 "$tool is not on PATH"
     return 0
   fi
+  # Only a link into the installer's versions dir is ours to retarget. Other
+  # programs called agent exist.
+  real=$(resolve "$live")
+  case $real in
+    */.local/share/cursor-agent/versions/*) ;;
+    *) cf_report apply "$tool" blocked "not a Cursor Agent install: $real"; return 0 ;;
+  esac
+  if [ ! -L "$live" ]; then
+    cf_report apply "$tool" blocked "$tool on PATH is not a link into the versions dir: $live"
+    return 0
+  fi
+  case $real in
+    */.local/share/cursor-agent/versions/"$ver"/*)
+      # The link already runs this release; replacing its dir would delete it.
+      cf_report apply "$tool" current "already linked to $ver"
+      return 0
+      ;;
+  esac
   live_line=$(cf_cap 10 "$cf_dir/cursor-live" "$live" --version && head -n 1 "$cf_dir/cursor-live" || true)
   live_tok=$(printf '%s\n' "$live_line" | sed -n 's/.*\([0-9][0-9][0-9][0-9]\.[0-9][0-9]\.[0-9][0-9]-[A-Za-z0-9][A-Za-z0-9]*\).*/\1/p' | head -n 1)
   if [ -n "$live_tok" ] && [ "$live_tok" = "$ver" ]; then
@@ -1222,56 +1342,71 @@ cf_apply_cursor_agent() {
     return 0
   fi
   versions="${HOME}/.local/share/cursor-agent/versions"
-  mkdir -p "$versions" || { cf_report apply "$tool" 1 "could not create Cursor Agent versions dir"; return 0; }
-  stage="$versions/.tmp-$ver"
   final="$versions/$ver"
-  rm -rf "$stage"
-  mkdir -p "$stage" || { cf_report apply "$tool" 1 "could not stage Cursor Agent"; return 0; }
-  bindir=$(dirname "$bin")
-  cp -a "$bindir"/. "$stage"/ || { rm -rf "$stage"; cf_report apply "$tool" 1 "could not copy Cursor Agent"; return 0; }
-  chmod 755 "$stage/cursor-agent" 2>/dev/null || true
-  if [ -e "$final" ] || [ -L "$final" ]; then
-    rm -rf "$final"
-  fi
-  if ! mv "$stage" "$final"; then
-    rm -rf "$stage"
-    cf_report apply "$tool" 1 "could not publish Cursor Agent version"
-    return 0
-  fi
+  # Read every old target before changing anything: live may be one of the
+  # two aliases under another spelling, and an alias may already run $ver.
+  prev_live=$(readlink "$live") && [ -n "$prev_live" ] || { cf_report apply "$tool" 1 "could not read $tool symlink"; return 0; }
   prev_agent=
   prev_cursor=
-  prev_live=
+  cf_ca_in_use=
   if [ -L "${HOME}/.local/bin/agent" ]; then
-    prev_agent=$(readlink "${HOME}/.local/bin/agent" || true)
-    cf_atomic_link "${HOME}/.local/bin/agent" "$final/cursor-agent" || true
+    cf_ca_real=$(resolve "${HOME}/.local/bin/agent")
+    case $cf_ca_real in
+      */.local/share/cursor-agent/versions/*) prev_agent=$(readlink "${HOME}/.local/bin/agent" || true) ;;
+    esac
+    case $cf_ca_real in
+      */.local/share/cursor-agent/versions/"$ver"/*) cf_ca_in_use=1 ;;
+    esac
   fi
   if [ -L "${HOME}/.local/bin/cursor-agent" ]; then
-    prev_cursor=$(readlink "${HOME}/.local/bin/cursor-agent" || true)
-    cf_atomic_link "${HOME}/.local/bin/cursor-agent" "$final/cursor-agent" || true
+    cf_ca_real=$(resolve "${HOME}/.local/bin/cursor-agent")
+    case $cf_ca_real in
+      */.local/share/cursor-agent/versions/*) prev_cursor=$(readlink "${HOME}/.local/bin/cursor-agent" || true) ;;
+    esac
+    case $cf_ca_real in
+      */.local/share/cursor-agent/versions/"$ver"/*) cf_ca_in_use=1 ;;
+    esac
   fi
-  if [ -L "$live" ]; then
-    prev_live=$(readlink "$live" || true)
-    cf_atomic_link "$live" "$final/cursor-agent" || {
-      cf_report apply "$tool" 1 "could not retarget $tool symlink"
-      return 0
-    }
-  elif [ ! -L "${HOME}/.local/bin/$tool" ]; then
-    real=$(resolve "$live")
-    if ! cf_atomic_replace "$real" "$final/cursor-agent"; then
-      cf_report apply "$tool" 1 "could not replace $tool"
+  # The other alias already runs this release: link to it as it is. Rewriting
+  # it would leave that alias nothing to roll back to.
+  if [ -z "$cf_ca_in_use" ] || [ ! -x "$final/cursor-agent" ]; then
+    mkdir -p "$versions" || { cf_report apply "$tool" 1 "could not create Cursor Agent versions dir"; return 0; }
+    stage="$versions/.tmp-$ver"
+    rm -rf "$stage"
+    mkdir -p "$stage" || { cf_report apply "$tool" 1 "could not stage Cursor Agent"; return 0; }
+    bindir=$(dirname "$bin")
+    cp -a "$bindir"/. "$stage"/ || { rm -rf "$stage"; cf_report apply "$tool" 1 "could not copy Cursor Agent"; return 0; }
+    chmod 755 "$stage/cursor-agent" 2>/dev/null || true
+    if [ -e "$final" ] || [ -L "$final" ]; then
+      rm -rf "$final"
+    fi
+    if ! mv "$stage" "$final"; then
+      rm -rf "$stage"
+      cf_report apply "$tool" 1 "could not publish Cursor Agent version"
       return 0
     fi
+  fi
+  if ! cf_atomic_link "$live" "$final/cursor-agent"; then
+    cf_report apply "$tool" 1 "could not retarget $tool symlink"
+    return 0
+  fi
+  if [ -n "$prev_agent" ]; then
+    cf_atomic_link "${HOME}/.local/bin/agent" "$final/cursor-agent" || true
+  fi
+  if [ -n "$prev_cursor" ]; then
+    cf_atomic_link "${HOME}/.local/bin/cursor-agent" "$final/cursor-agent" || true
   fi
   cf_confirm_live 20 "$live" "$ver" cursor
   case $cf_confirm in
     match)
       cf_report apply "$tool" 0 "$final/cursor-agent"
       ;;
-    mismatch)
-      if [ -n "$prev_live" ]; then cf_atomic_link "$live" "$prev_live" || true; fi
-      if [ -n "$prev_agent" ]; then cf_atomic_link "${HOME}/.local/bin/agent" "$prev_agent" || true; fi
-      if [ -n "$prev_cursor" ]; then cf_atomic_link "${HOME}/.local/bin/cursor-agent" "$prev_cursor" || true; fi
-      cf_report apply "$tool" 1 "staged Cursor Agent reported $cf_confirm_got, want $ver; previous symlink restored"
+    mismatch|broken)
+      cf_rb_failed=
+      cf_relink_back "${HOME}/.local/bin/agent" "$prev_agent"
+      cf_relink_back "${HOME}/.local/bin/cursor-agent" "$prev_cursor"
+      cf_relink_back "$live" "$prev_live"
+      cf_report apply "$tool" 1 "staged Cursor Agent $(cf_confirm_reason "$ver"); $(cf_rb_detail)"
       ;;
     soft-keychain)
       cf_report apply "$tool" 0 "installed $ver; version check skipped (macOS login keychain is locked)"
@@ -1317,58 +1452,5 @@ cf_pack_codex_platform() {
     return 1
   fi
   printf '%s\n' "$tarball"
-}
-
-stage_release_opencode() {
-  tool=$1
-  root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
-  dest="$root/npm/$tool"
-  rm -rf "$dest"
-  mkdir -p "$dest" "$root/staged" "$root/release/$tool" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
-  if ! cf_download "$root/release/$tool/latest.json" "https://opencode.ai/update/api/latest/cli/npm"; then
-    cf_report fetch "$tool" 1 "could not read OpenCode release"
-    return 0
-  fi
-  pkg=$(sed -n 's/.*"package"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/release/$tool/latest.json" | head -n 1)
-  ver=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' "$root/release/$tool/latest.json" | head -n 1)
-  case $pkg in
-    @opencode/cli|opencode-ai) ;;
-    *) cf_report fetch "$tool" 1 "OpenCode release did not name a package"; return 0 ;;
-  esac
-  case $ver in
-    [0-9]*.[0-9]*.[0-9]*) ;;
-    *) cf_report fetch "$tool" 1 "OpenCode release did not name a version"; return 0 ;;
-  esac
-  file=$(npm pack --loglevel=error --pack-destination "$dest" "$pkg@$ver" </dev/null) || {
-    cf_report fetch "$tool" 1 "npm pack failed"
-    return 0
-  }
-  file=$(printf '%s\n' "$file" | sed '/^[[:space:]]*$/d' | tail -n 1)
-  case $file in
-    /*|./*|../*|*/*) tarball=$file ;;
-    *) tarball=$dest/$file ;;
-  esac
-  case $tarball in
-    "$dest"/*.tgz) ;;
-    *) cf_report fetch "$tool" 1 "npm pack did not name a tarball"; return 0 ;;
-  esac
-  if [ ! -f "$tarball" ] || [ -L "$tarball" ]; then
-    cf_report fetch "$tool" 1 "missing tarball"
-    return 0
-  fi
-  gotver=$(cf_tarball_version "$tarball")
-  [ -n "$gotver" ] || gotver=$ver
-  eng=$(cf_tarball_engines "$tarball")
-  [ -n "$eng" ] || eng=-
-  printf 'npm\t%s\t%s\t%s\t%s\t-\n' "$pkg" "$tarball" "$gotver" "$eng" > "$root/staged/$tool.tmp" || {
-    cf_report fetch "$tool" 1 "could not write stamp"
-    return 0
-  }
-  mv -f "$root/staged/$tool.tmp" "$root/staged/$tool" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
-  est=$(cf_engines_status "$eng")
-  case $est in
-    ok) cf_report fetch "$tool" 0 "$tarball" ;;
-    *) cf_report fetch "$tool" blocked "${est#blocked: }" ;;
-  esac
 }
 `

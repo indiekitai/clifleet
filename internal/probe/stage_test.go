@@ -3,10 +3,13 @@ package probe
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -409,12 +412,23 @@ exit 0
 	}
 }
 
+// runSh runs a generated script with a hard deadline. If a fake binary is
+// shadowed by a real one (a network npm pack, say), the test fails in a
+// minute instead of holding the package until go test's 10m timeout.
 func runSh(t *testing.T, script string, env []string) string {
 	t.Helper()
-	cmd := exec.Command("sh", "-s")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-s")
 	cmd.Stdin = strings.NewReader(script)
 	cmd.Env = env
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = time.Second
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("script did not finish in time; a real binary may be shadowing a fake one:\n%s", out)
+	}
 	if err != nil {
 		t.Fatalf("script failed: %v\n%s", err, out)
 	}
@@ -694,7 +708,18 @@ case $url in
   *) cp "$CURL_BODY" "$out" ;;
 esac
 `)
-	writeExe(t, filepath.Join(bin, "codex"), "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n")
+	standalone := filepath.Join(home, ".codex", "packages", "standalone")
+	oldRel := filepath.Join(standalone, "releases", "1.0.0-old")
+	if err := os.MkdirAll(filepath.Join(oldRel, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(oldRel, "bin", "codex"), "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n")
+	if err := os.Symlink(oldRel, filepath.Join(standalone, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(standalone, "current", "bin", "codex"), filepath.Join(bin, "codex")); err != nil {
+		t.Fatal(err)
+	}
 	logPath := filepath.Join(root, "curl.log")
 	step := StageStep{Tool: "codex", Kind: catalog.KindRelease, Release: "codex"}
 	fetch, err := FetchScript([]string{bin}, []StageStep{step})
@@ -1203,30 +1228,34 @@ func TestCodexApplyRefusesMiseShim(t *testing.T) {
 		t.Fatalf("mise binary changed: %v %q", err, body)
 	}
 
-	// A real binary in ~/.local/bin stays ahead of the shim and can be swapped.
+	// A plain codex ahead of the shim is not a standalone install either: it
+	// could be npm's codex.js or a wrapper, and apply must leave it alone.
 	localBin := filepath.Join(home, ".local", "bin")
 	if err := os.MkdirAll(localBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeExe(t, filepath.Join(localBin, "codex"), "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n")
-	out = runSh(t, apply, env)
-	results, obs, err := ParseApply(out)
+	const plain = "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n"
+	writeExe(t, filepath.Join(localBin, "codex"), plain)
+	env = []string{"PATH=" + localBin + ":" + bin + ":/usr/bin:/bin", "HOME=" + home}
+	apply, err = ApplyScript([]Tool{{Name: "codex", Binary: "codex"}}, []string{localBin, bin}, []StageStep{step})
 	if err != nil {
-		t.Fatalf("real apply: %v\n%s", err, out)
+		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Exit != 0 || results[0].Blocked != "" {
-		t.Fatalf("real binary should swap: %+v\n%s", results, out)
+	out = runSh(t, apply, env)
+	results, _, err = ParseApply(out)
+	if err != nil {
+		t.Fatalf("plain apply: %v\n%s", err, out)
 	}
-	if ShortVersion(obs["codex"].Version) != "1.2.3" {
-		t.Fatalf("reprobe %+v", obs["codex"])
+	if len(results) != 1 || !strings.Contains(results[0].Blocked, "not a standalone Codex install") {
+		t.Fatalf("plain codex should be refused: %+v\n%s", results, out)
 	}
 	body, err = os.ReadFile(mise)
 	if err != nil || string(body) != "MISE-BINARY\n" {
-		t.Fatalf("mise binary changed after real swap: %v %q", err, body)
+		t.Fatalf("mise binary changed: %v %q", err, body)
 	}
 	live, err := os.ReadFile(filepath.Join(localBin, "codex"))
-	if err != nil || !strings.Contains(string(live), "1.2.3") {
-		t.Fatalf("real codex was not replaced: %v %q", err, live)
+	if err != nil || string(live) != plain {
+		t.Fatalf("plain codex was rewritten: %v %q", err, live)
 	}
 }
 
@@ -1436,5 +1465,660 @@ func writeTarGz(t *testing.T, path string, files map[string]string) {
 		if _, err := tw.Write([]byte(body)); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// npmRollbackFixture installs codex 1.0.0, with a darwin-arm64 platform
+// package when withPlat is set, stages 2.0.0 (main plus platform) whose
+// codex.js is newCodex, and runs apply. It returns the result and the main
+// package, platform package and prefix directories.
+func npmRollbackFixture(t *testing.T, newCodex string, withPlat bool) (ActionResult, string, string, string) {
+	t.Helper()
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	bin := filepath.Join(root, "bin")
+	prefix := filepath.Join(root, "prefix")
+	liveRoot := filepath.Join(prefix, "lib", "node_modules")
+	mainDir := filepath.Join(liveRoot, "@openai", "codex")
+	platDir := filepath.Join(liveRoot, "@openai", "codex-darwin-arm64")
+	cache := filepath.Join(home, ".cache", "clifleet")
+	for _, d := range []string{filepath.Join(mainDir, "bin"), bin, filepath.Join(prefix, "bin"), filepath.Join(cache, "npm", "codex"), filepath.Join(cache, "staged")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExe(t, filepath.Join(mainDir, "bin", "codex.js"), "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n")
+	if err := os.WriteFile(filepath.Join(mainDir, "package.json"), []byte("{\"name\":\"@openai/codex\",\"version\":\"1.0.0\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if withPlat {
+		if err := os.MkdirAll(platDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(platDir, "id"), []byte("OLD-plat\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("../lib/node_modules/@openai/codex/bin/codex.js", filepath.Join(prefix, "bin", "codex")); err != nil {
+		t.Fatal(err)
+	}
+	tarball := filepath.Join(cache, "npm", "codex", "openai-codex-2.0.0.tgz")
+	writeTarGz(t, tarball, map[string]string{"package/package.json": "{\"name\":\"@openai/codex\",\"version\":\"2.0.0\"}\n"})
+	platTarball := filepath.Join(cache, "npm", "codex", "openai-codex-2.0.0-darwin-arm64.tgz")
+	writeTarGz(t, platTarball, map[string]string{"package/package.json": "{\"name\":\"@openai/codex-darwin-arm64\",\"version\":\"2.0.0\"}\n"})
+	stamp := "npm\t@openai/codex\t" + tarball + "\t2.0.0\t-\t" + platTarball + "\n"
+	if err := os.WriteFile(filepath.Join(cache, "staged", "codex"), []byte(stamp), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newPath := filepath.Join(root, "new-codex.js")
+	if err := os.WriteFile(newPath, []byte(newCodex), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// npm installs the new main package plus a new platform package.
+	writeExe(t, filepath.Join(bin, "npm"), `#!/bin/sh
+if [ "$1" = root ]; then
+  printf '%s\n' "$LIVE_ROOT"
+  exit 0
+fi
+if [ "$1" = install ]; then
+  p=.
+  last=
+  for a in "$@"; do
+    if [ "$last" = --prefix ]; then p=$a; fi
+    last=$a
+  done
+  mkdir -p "$p/lib/node_modules/@openai/codex/bin" "$p/lib/node_modules/@openai/codex-darwin-arm64"
+  printf '%s\n' '{"name":"@openai/codex","version":"2.0.0"}' > "$p/lib/node_modules/@openai/codex/package.json"
+  cp "$NEW_CODEX" "$p/lib/node_modules/@openai/codex/bin/codex.js"
+  chmod 755 "$p/lib/node_modules/@openai/codex/bin/codex.js"
+  printf 'NEW-plat\n' > "$p/lib/node_modules/@openai/codex-darwin-arm64/id"
+  exit 0
+fi
+exit 0
+`)
+	script, err := ApplyScript([]Tool{{Name: "codex", Binary: "codex"}}, []string{filepath.Join(prefix, "bin"), bin}, []StageStep{{
+		Tool: "codex", Kind: catalog.MethodNpm, Package: "@openai/codex",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := []string{
+		"PATH=" + filepath.Join(prefix, "bin") + ":" + bin + ":/usr/bin:/bin",
+		"HOME=" + home,
+		"LIVE_ROOT=" + liveRoot,
+		"NEW_CODEX=" + newPath,
+	}
+	out := runSh(t, script, env)
+	results, _, err := ParseApply(out)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("%v %+v\n%s", err, results, out)
+	}
+	return results[0], mainDir, platDir, prefix
+}
+
+// When the new codex does not run, both the main package and its platform
+// package go back to the previous install. Each must land in its own place.
+func TestNpmRollbackRestoresMainAndPlatform(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	got, mainDir, platDir, prefix := npmRollbackFixture(t, "#!/bin/sh\nexit 1\n", true)
+	if got.Exit == 0 || !strings.Contains(got.Detail, "restored") {
+		t.Fatalf("apply %+v", got)
+	}
+	ver, err := os.ReadFile(filepath.Join(mainDir, "package.json"))
+	if err != nil || !strings.Contains(string(ver), "1.0.0") {
+		t.Fatalf("main package not restored: %v %q", err, ver)
+	}
+	plat, err := os.ReadFile(filepath.Join(platDir, "id"))
+	if err != nil || string(plat) != "OLD-plat\n" {
+		t.Fatalf("platform package not restored: %v %q", err, plat)
+	}
+	if _, err := os.Stat(filepath.Join(platDir, "package.json")); err == nil {
+		t.Fatal("main package was moved into the platform directory")
+	}
+	still, err := exec.Command(filepath.Join(prefix, "bin", "codex"), "--version").Output()
+	if err != nil || !strings.Contains(string(still), "1.0.0") {
+		t.Fatalf("codex after rollback %v %q", err, still)
+	}
+}
+
+// A staged release that does not run, or reports another version, must not
+// stay live. Before this, a binary killed on exec counted as "did not print a
+// version" and the swap was reported as a success.
+func TestReleaseApplyRollsBackBrokenBinary(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	setup := func(t *testing.T) (home, localBin string, env []string) {
+		root := t.TempDir()
+		home = filepath.Join(root, "home")
+		localBin = filepath.Join(home, ".local", "bin")
+		if err := os.MkdirAll(localBin, 0o755); err != nil || os.MkdirAll(filepath.Join(home, ".cache", "clifleet", "staged"), 0o755) != nil {
+			t.Fatal(err)
+		}
+		return home, localBin, []string{"PATH=" + localBin + ":/usr/bin:/bin", "HOME=" + home}
+	}
+	stage := func(t *testing.T, home, tool, line string) {
+		if err := os.WriteFile(filepath.Join(home, ".cache", "clifleet", "staged", tool), []byte(line+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	apply := func(t *testing.T, tool string, extra []string, env []string) ActionResult {
+		script, err := ApplyScript([]Tool{{Name: tool, Binary: tool}}, extra, []StageStep{{Tool: tool, Kind: catalog.KindRelease, Release: tool}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := runSh(t, script, env)
+		results, _, err := ParseApply(out)
+		if err != nil || len(results) != 1 {
+			t.Fatalf("apply %v %+v\n%s", err, results, out)
+		}
+		if results[0].Exit == 0 || !strings.Contains(results[0].Detail, "restored") {
+			t.Fatalf("broken release was accepted: %+v\n%s", results[0], out)
+		}
+		return results[0]
+	}
+	version := func(t *testing.T, path string) string {
+		out, err := exec.Command(path, "--version").Output()
+		if err != nil {
+			t.Fatalf("%s --version: %v", path, err)
+		}
+		return string(out)
+	}
+	const crash = "#!/bin/sh\nkill -9 $$\n"
+
+	t.Run("claude symlink", func(t *testing.T) {
+		home, localBin, env := setup(t)
+		versions := filepath.Join(home, ".local", "share", "claude", "versions")
+		if err := os.MkdirAll(versions, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		old := filepath.Join(versions, "2.1.0")
+		writeExe(t, old, "#!/bin/sh\nprintf '2.1.0 (Claude Code)\\n'\n")
+		if err := os.Symlink(old, filepath.Join(localBin, "claude")); err != nil {
+			t.Fatal(err)
+		}
+		staged := filepath.Join(home, ".cache", "clifleet", "claude-2.1.40")
+		writeExe(t, staged, crash)
+		stage(t, home, "claude", "release\tclaude\t2.1.40\t"+staged)
+		got := apply(t, "claude", []string{localBin}, env)
+		if !strings.Contains(got.Detail, "did not run") {
+			t.Fatalf("detail %q", got.Detail)
+		}
+		if link, _ := os.Readlink(filepath.Join(localBin, "claude")); link != old {
+			t.Fatalf("claude link %q, want %q", link, old)
+		}
+	})
+
+	t.Run("claude prints the version then dies", func(t *testing.T) {
+		home, localBin, env := setup(t)
+		versions := filepath.Join(home, ".local", "share", "claude", "versions")
+		if err := os.MkdirAll(versions, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		old := filepath.Join(versions, "2.1.0")
+		writeExe(t, old, "#!/bin/sh\nprintf '2.1.0 (Claude Code)\\n'\n")
+		if err := os.Symlink(old, filepath.Join(localBin, "claude")); err != nil {
+			t.Fatal(err)
+		}
+		staged := filepath.Join(home, ".cache", "clifleet", "claude-2.1.40")
+		writeExe(t, staged, "#!/bin/sh\nprintf '2.1.40 (Claude Code)\\n'\nkill -9 $$\n")
+		stage(t, home, "claude", "release\tclaude\t2.1.40\t"+staged)
+		got := apply(t, "claude", []string{localBin}, env)
+		if !strings.Contains(got.Detail, "did not run") {
+			t.Fatalf("detail %q", got.Detail)
+		}
+		if link, _ := os.Readlink(filepath.Join(localBin, "claude")); link != old {
+			t.Fatalf("claude link %q, want %q", link, old)
+		}
+	})
+
+	t.Run("codex without a current link", func(t *testing.T) {
+		home, localBin, env := setup(t)
+		standalone := filepath.Join(home, ".codex", "packages", "standalone")
+		oldRel := filepath.Join(standalone, "releases", "1.0.0-old")
+		if err := os.MkdirAll(filepath.Join(oldRel, "bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		oldBin := filepath.Join(oldRel, "bin", "codex")
+		writeExe(t, oldBin, "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n")
+		if err := os.Symlink(oldBin, filepath.Join(localBin, "codex")); err != nil {
+			t.Fatal(err)
+		}
+		archive := filepath.Join(home, ".cache", "clifleet", "codex-package.tgz")
+		writeTarGz(t, archive, map[string]string{
+			"bin/codex":          crash,
+			"codex-package.json": "{\"version\":\"1.2.3\"}\n",
+		})
+		stage(t, home, "codex", "release\tcodex\tcodex-package.tgz\t"+archive)
+		apply(t, "codex", []string{localBin}, env)
+		if _, err := os.Lstat(filepath.Join(standalone, "current")); err == nil {
+			t.Fatal("rollback left a current link that did not exist before")
+		}
+		if link, _ := os.Readlink(filepath.Join(localBin, "codex")); link != oldBin {
+			t.Fatalf("codex link %q, want %q", link, oldBin)
+		}
+	})
+
+	t.Run("codex standalone", func(t *testing.T) {
+		home, localBin, env := setup(t)
+		standalone := filepath.Join(home, ".codex", "packages", "standalone")
+		oldRel := filepath.Join(standalone, "releases", "1.0.0-old")
+		if err := os.MkdirAll(filepath.Join(oldRel, "bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeExe(t, filepath.Join(oldRel, "bin", "codex"), "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n")
+		if err := os.Symlink(oldRel, filepath.Join(standalone, "current")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(standalone, "current", "bin", "codex"), filepath.Join(localBin, "codex")); err != nil {
+			t.Fatal(err)
+		}
+		// The package says 1.2.3 but the binary inside is something else.
+		archive := filepath.Join(home, ".cache", "clifleet", "codex-package.tgz")
+		writeTarGz(t, archive, map[string]string{
+			"bin/codex":          "#!/bin/sh\nprintf 'codex-cli 9.9.9\\n'\n",
+			"codex-package.json": "{\"version\":\"1.2.3\"}\n",
+		})
+		stage(t, home, "codex", "release\tcodex\tcodex-package.tgz\t"+archive)
+		got := apply(t, "codex", []string{localBin}, env)
+		if !strings.Contains(got.Detail, "reported 9.9.9, want 1.2.3") {
+			t.Fatalf("detail %q", got.Detail)
+		}
+		if cur, _ := os.Readlink(filepath.Join(standalone, "current")); cur != oldRel {
+			t.Fatalf("current link %q, want %q", cur, oldRel)
+		}
+		if v := version(t, filepath.Join(localBin, "codex")); !strings.Contains(v, "1.0.0") {
+			t.Fatalf("codex after rollback %q", v)
+		}
+	})
+}
+
+// A rollback that cannot put the old link back must say so instead of
+// reporting "restored".
+func TestReleaseRollbackFailureIsReported(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only directory")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	localBin := filepath.Join(home, ".local", "bin")
+	versions := filepath.Join(home, ".local", "share", "claude", "versions")
+	staged := filepath.Join(home, ".cache", "clifleet", "staged")
+	for _, d := range []string{localBin, versions, staged} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _ = os.Chmod(localBin, 0o755) })
+	old := filepath.Join(versions, "2.1.0")
+	writeExe(t, old, "#!/bin/sh\nprintf '2.1.0 (Claude Code)\\n'\n")
+	if err := os.Symlink(old, filepath.Join(localBin, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	// The new binary locks the link directory and then dies.
+	bad := filepath.Join(home, ".cache", "clifleet", "claude-2.1.40")
+	writeExe(t, bad, "#!/bin/sh\nchmod 555 \"$HOME/.local/bin\"\nkill -9 $$\n")
+	if err := os.WriteFile(filepath.Join(staged, "claude"), []byte("release\tclaude\t2.1.40\t"+bad+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script, err := ApplyScript([]Tool{{Name: "claude", Binary: "claude"}}, []string{localBin}, []StageStep{{Tool: "claude", Kind: catalog.KindRelease, Release: "claude"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := runSh(t, script, []string{"PATH=" + localBin + ":/usr/bin:/bin", "HOME=" + home})
+	results, _, err := ParseApply(out)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("%v %+v\n%s", err, results, out)
+	}
+	got := results[0]
+	if got.Exit == 0 || strings.Contains(got.Detail, "restored") || !strings.Contains(got.Detail, "rollback failed") {
+		t.Fatalf("detail %+v\n%s", got, out)
+	}
+}
+
+// cursorFixture lays out a Cursor Agent install at oldVer with the given
+// aliases in ~/.local/bin, and stages newVer whose binary is body.
+func cursorFixture(t *testing.T, tool, oldVer, newVer, body string, aliases ...string) (home, localBin string, env []string) {
+	t.Helper()
+	root := t.TempDir()
+	home = filepath.Join(root, "home")
+	localBin = filepath.Join(home, ".local", "bin")
+	oldDir := filepath.Join(home, ".local", "share", "cursor-agent", "versions", oldVer)
+	staged := filepath.Join(home, ".cache", "clifleet", "staged")
+	for _, d := range []string{localBin, oldDir, staged} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExe(t, filepath.Join(oldDir, "cursor-agent"), "#!/bin/sh\nprintf '"+oldVer+"\\n'\n")
+	for _, a := range aliases {
+		if err := os.Symlink(filepath.Join(oldDir, "cursor-agent"), filepath.Join(localBin, a)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	archive := filepath.Join(root, "agent.tgz")
+	writeTarGz(t, archive, map[string]string{"payload/cursor-agent": body})
+	if err := os.WriteFile(filepath.Join(staged, tool), []byte("release\tcursor-agent\t"+newVer+"\t"+archive+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return home, localBin, []string{"PATH=" + localBin + ":/usr/bin:/bin", "HOME=" + home}
+}
+
+func applyOneRelease(t *testing.T, tool, release, extra string, env []string) ActionResult {
+	t.Helper()
+	script, err := ApplyScript([]Tool{{Name: tool, Binary: tool}}, []string{extra}, []StageStep{{Tool: tool, Kind: catalog.KindRelease, Release: release}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := runSh(t, script, env)
+	results, _, err := ParseApply(out)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("%v %+v\n%s", err, results, out)
+	}
+	return results[0]
+}
+
+// Another program called agent in ~/.local/bin is not Cursor's alias.
+func TestCursorAgentLeavesForeignAgentAlone(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	ver := "2026.10.28-abc123"
+	home, localBin, env := cursorFixture(t, "cursor-agent", "2026.01.01-aaaa", ver, "#!/bin/sh\nprintf '"+ver+"\\n'\n", "cursor-agent")
+	other := filepath.Join(home, "other", "agent")
+	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, other, "#!/bin/sh\necho other\n")
+	if err := os.Symlink(other, filepath.Join(localBin, "agent")); err != nil {
+		t.Fatal(err)
+	}
+	got := applyOneRelease(t, "cursor-agent", "cursor_agent", localBin, env)
+	if got.Exit != 0 {
+		t.Fatalf("apply %+v", got)
+	}
+	if link, _ := os.Readlink(filepath.Join(localBin, "agent")); link != other {
+		t.Fatalf("foreign agent retargeted to %q", link)
+	}
+	if link, _ := os.Readlink(filepath.Join(localBin, "cursor-agent")); !strings.Contains(link, "/versions/"+ver+"/") {
+		t.Fatalf("cursor-agent link %q", link)
+	}
+}
+
+// When the live link already points at the staged version but its version
+// check printed nothing, apply must not rewrite the files it runs from.
+func TestReleaseApplyKeepsAlreadyLinkedVersion(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	const silent = "#!/bin/sh\nexit 0\n"
+	t.Run("claude", func(t *testing.T) {
+		root := t.TempDir()
+		home := filepath.Join(root, "home")
+		localBin := filepath.Join(home, ".local", "bin")
+		versions := filepath.Join(home, ".local", "share", "claude", "versions")
+		staged := filepath.Join(home, ".cache", "clifleet", "staged")
+		for _, d := range []string{localBin, versions, staged} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		live := filepath.Join(versions, "2.1.40")
+		writeExe(t, live, silent)
+		if err := os.Symlink(live, filepath.Join(localBin, "claude")); err != nil {
+			t.Fatal(err)
+		}
+		other := filepath.Join(home, ".cache", "clifleet", "claude-2.1.40")
+		writeExe(t, other, "#!/bin/sh\nkill -9 $$\n")
+		if err := os.WriteFile(filepath.Join(staged, "claude"), []byte("release\tclaude\t2.1.40\t"+other+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := applyOneRelease(t, "claude", "claude", localBin, []string{"PATH=" + localBin + ":/usr/bin:/bin", "HOME=" + home})
+		if !got.Current {
+			t.Fatalf("apply %+v", got)
+		}
+		if body, _ := os.ReadFile(live); string(body) != silent {
+			t.Fatalf("live claude rewritten: %q", body)
+		}
+	})
+	t.Run("cursor agent", func(t *testing.T) {
+		ver := "2026.10.28-abc123"
+		home, localBin, env := cursorFixture(t, "agent", ver, ver, "#!/bin/sh\nkill -9 $$\n", "agent")
+		liveBin := filepath.Join(home, ".local", "share", "cursor-agent", "versions", ver, "cursor-agent")
+		writeExe(t, liveBin, silent)
+		got := applyOneRelease(t, "agent", "agent", localBin, env)
+		if !got.Current {
+			t.Fatalf("apply %+v", got)
+		}
+		if body, _ := os.ReadFile(liveBin); string(body) != silent {
+			t.Fatalf("live agent rewritten: %q", body)
+		}
+	})
+}
+
+// The native installer may write a relative link; it is still the vendor layout.
+func TestClaudeRelativeLinkIsVendorLayout(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	localBin := filepath.Join(home, ".local", "bin")
+	versions := filepath.Join(home, ".local", "share", "claude", "versions")
+	staged := filepath.Join(home, ".cache", "clifleet", "staged")
+	for _, d := range []string{localBin, versions, staged} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExe(t, filepath.Join(versions, "2.1.0"), "#!/bin/sh\nprintf '2.1.0 (Claude Code)\\n'\n")
+	if err := os.Symlink("../share/claude/versions/2.1.0", filepath.Join(localBin, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := ProbeScript([]Tool{{Name: "claude", Binary: "claude"}}, []string{localBin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"PATH=" + localBin + ":/usr/bin:/bin", "HOME=" + home}
+	out := runSh(t, probe, env)
+	obs, err := ParseProbe(out)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if real := obs["claude"].Real; strings.Contains(real, "..") || !strings.Contains(real, "/.local/share/claude/versions/2.1.0") {
+		t.Fatalf("real %q\n%s", real, out)
+	}
+	newBin := filepath.Join(home, ".cache", "clifleet", "claude-2.1.40")
+	writeExe(t, newBin, "#!/bin/sh\nprintf '2.1.40 (Claude Code)\\n'\n")
+	if err := os.WriteFile(filepath.Join(staged, "claude"), []byte("release\tclaude\t2.1.40\t"+newBin+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := applyOneRelease(t, "claude", "claude", localBin, env)
+	if got.Exit != 0 || got.Blocked != "" {
+		t.Fatalf("apply %+v", got)
+	}
+}
+
+// A new package that cannot run and also blocks the rollback must not be
+// reported as restored.
+func TestNpmRollbackFailureIsReported(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only directory")
+	}
+	// The new codex.js locks the @openai scope dir, so the old package cannot
+	// be moved back. Cleanup runs before TempDir's removal (LIFO).
+	got, mainDir, _, _ := npmRollbackFixture(t, "#!/bin/sh\nchmod 555 \"$LIVE_ROOT/@openai\"\nexit 1\n", true)
+	t.Cleanup(func() { _ = os.Chmod(filepath.Dir(mainDir), 0o755) })
+	if got.Exit == 0 || strings.Contains(got.Detail, "previous install restored") || !strings.Contains(got.Detail, "rollback failed") {
+		t.Fatalf("apply %+v", got)
+	}
+}
+
+// A platform package that only this apply created goes away on rollback;
+// leaving it would install something that was not there.
+func TestNpmRollbackRemovesNewPlatformPackage(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	got, mainDir, platDir, _ := npmRollbackFixture(t, "#!/bin/sh\nexit 1\n", false)
+	if got.Exit == 0 || !strings.Contains(got.Detail, "previous install restored") {
+		t.Fatalf("apply %+v", got)
+	}
+	if _, err := os.Lstat(platDir); err == nil {
+		t.Fatal("rollback left the new platform package behind")
+	}
+	if ver, err := os.ReadFile(filepath.Join(mainDir, "package.json")); err != nil || !strings.Contains(string(ver), "1.0.0") {
+		t.Fatalf("main package not restored: %v %q", err, ver)
+	}
+}
+
+// codexTarget mirrors cf_codex_target for the hosts the tests run on.
+func codexTarget(t *testing.T) string {
+	t.Helper()
+	switch runtime.GOOS + "/" + runtime.GOARCH {
+	case "darwin/arm64":
+		return "aarch64-apple-darwin"
+	case "linux/amd64":
+		return "x86_64-unknown-linux-musl"
+	case "linux/arm64":
+		return "aarch64-unknown-linux-musl"
+	}
+	t.Skip("no Codex target mapping for " + runtime.GOOS + "/" + runtime.GOARCH)
+	return ""
+}
+
+// current already holds the staged release but the PATH link still runs an
+// older one: apply moves the link and leaves the release dir alone.
+func TestCodexApplyMovesLaggingLink(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	localBin := filepath.Join(home, ".local", "bin")
+	standalone := filepath.Join(home, ".codex", "packages", "standalone")
+	oldRel := filepath.Join(standalone, "releases", "1.0.0-old")
+	newRel := filepath.Join(standalone, "releases", "1.2.3-"+codexTarget(t))
+	staged := filepath.Join(home, ".cache", "clifleet", "staged")
+	for _, d := range []string{localBin, filepath.Join(oldRel, "bin"), filepath.Join(newRel, "bin"), staged} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExe(t, filepath.Join(oldRel, "bin", "codex"), "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n")
+	const installed = "#!/bin/sh\nprintf 'codex-cli 1.2.3\\n'\n# installed\n"
+	writeExe(t, filepath.Join(newRel, "bin", "codex"), installed)
+	if err := os.Symlink(newRel, filepath.Join(standalone, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(oldRel, "bin", "codex"), filepath.Join(localBin, "codex")); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(root, "codex-package.tgz")
+	writeTarGz(t, archive, map[string]string{
+		"bin/codex":          "#!/bin/sh\nkill -9 $$\n",
+		"codex-package.json": "{\"version\":\"1.2.3\"}\n",
+	})
+	if err := os.WriteFile(filepath.Join(staged, "codex"), []byte("release\tcodex\tcodex-package.tgz\t"+archive+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := applyOneRelease(t, "codex", "codex", localBin, []string{"PATH=" + localBin + ":/usr/bin:/bin", "HOME=" + home})
+	if got.Exit != 0 || got.Current {
+		t.Fatalf("apply %+v", got)
+	}
+	if body, _ := os.ReadFile(filepath.Join(newRel, "bin", "codex")); string(body) != installed {
+		t.Fatalf("installed release rewritten: %q", body)
+	}
+	if link, _ := os.Readlink(filepath.Join(localBin, "codex")); link != filepath.Join(standalone, "current", "bin", "codex") {
+		t.Fatalf("codex link %q", link)
+	}
+}
+
+// agent runs an old release while cursor-agent already runs the staged one.
+// Upgrading agent must link it to that release, not rewrite it.
+func TestCursorAgentKeepsReleaseTheOtherAliasRuns(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	ver := "2026.10.28-abc123"
+	home, localBin, env := cursorFixture(t, "agent", "2026.01.01-aaaa", ver, "#!/bin/sh\nkill -9 $$\n", "agent")
+	inUse := filepath.Join(home, ".local", "share", "cursor-agent", "versions", ver)
+	if err := os.MkdirAll(inUse, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	working := "#!/bin/sh\nprintf '" + ver + "\\n'\n"
+	writeExe(t, filepath.Join(inUse, "cursor-agent"), working)
+	if err := os.Symlink(filepath.Join(inUse, "cursor-agent"), filepath.Join(localBin, "cursor-agent")); err != nil {
+		t.Fatal(err)
+	}
+	got := applyOneRelease(t, "agent", "agent", localBin, env)
+	if got.Exit != 0 {
+		t.Fatalf("apply %+v", got)
+	}
+	if body, _ := os.ReadFile(filepath.Join(inUse, "cursor-agent")); string(body) != working {
+		t.Fatalf("release cursor-agent runs was rewritten: %q", body)
+	}
+	if link, _ := os.Readlink(filepath.Join(localBin, "agent")); !strings.Contains(link, "/versions/"+ver+"/") {
+		t.Fatalf("agent link %q", link)
+	}
+}
+
+// Rolling back a lagging-link apply only moves the PATH link back. current was
+// never changed, so a read-only standalone dir must not turn into a failed
+// rollback.
+func TestCodexLaggingLinkRollbackLeavesCurrent(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only directory")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	localBin := filepath.Join(home, ".local", "bin")
+	standalone := filepath.Join(home, ".codex", "packages", "standalone")
+	oldRel := filepath.Join(standalone, "releases", "1.0.0-old")
+	newRel := filepath.Join(standalone, "releases", "1.2.3-"+codexTarget(t))
+	staged := filepath.Join(home, ".cache", "clifleet", "staged")
+	for _, d := range []string{localBin, filepath.Join(oldRel, "bin"), filepath.Join(newRel, "bin"), staged} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldBin := filepath.Join(oldRel, "bin", "codex")
+	writeExe(t, oldBin, "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n")
+	writeExe(t, filepath.Join(newRel, "bin", "codex"), "#!/bin/sh\nkill -9 $$\n")
+	if err := os.Symlink(newRel, filepath.Join(standalone, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(oldBin, filepath.Join(localBin, "codex")); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(root, "codex-package.tgz")
+	writeTarGz(t, archive, map[string]string{
+		"bin/codex":          "#!/bin/sh\nkill -9 $$\n",
+		"codex-package.json": "{\"version\":\"1.2.3\"}\n",
+	})
+	if err := os.WriteFile(filepath.Join(staged, "codex"), []byte("release\tcodex\tcodex-package.tgz\t"+archive+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(standalone, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(standalone, 0o755) })
+	got := applyOneRelease(t, "codex", "codex", localBin, []string{"PATH=" + localBin + ":/usr/bin:/bin", "HOME=" + home})
+	if got.Exit == 0 || !strings.Contains(got.Detail, "previous release restored") {
+		t.Fatalf("apply %+v", got)
+	}
+	if link, _ := os.Readlink(filepath.Join(localBin, "codex")); link != oldBin {
+		t.Fatalf("codex link %q, want %q", link, oldBin)
 	}
 }

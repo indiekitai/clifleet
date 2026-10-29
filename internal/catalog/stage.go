@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"path"
 	"strings"
 
 	"github.com/indiekitai/clifleet/internal/shellquote"
@@ -86,7 +87,7 @@ func PlanStage(spec Spec, obs Observation, methodOverride string) StagePlan {
 	case MethodYarn:
 		return StagePlan{Method: MethodYarn, Action: ActionNoStage, Reason: ReasonNoStageYarn}
 	case MethodNative:
-		if id, ok := nativeRelease(spec.Name); ok {
+		if id, ok := nativeRelease(spec.Name, obs.Real); ok {
 			return releaseStage(id)
 		}
 		return StagePlan{Method: MethodNative, Action: ActionNoStage, Reason: ReasonNoStageNative}
@@ -97,15 +98,34 @@ func PlanStage(spec Spec, obs Observation, methodOverride string) StagePlan {
 
 // nativeRelease reports the staged-artifact id for a native install.
 // cursor-agent's id uses an underscore because it becomes a shell function name.
-func nativeRelease(name string) (string, bool) {
+//
+// The name alone is not enough: apply replaces whatever real the probe
+// found, so an unrelated binary called "agent", or a wrapper script called
+// "claude", would be overwritten. Only an install in the vendor's own
+// layout is staged. Anything else is no-stage; --one-shot still runs the
+// vendor updater.
+//
+// Native OpenCode is not staged. Its install script puts the binary in
+// ~/.opencode/bin, and the npm channel would add a second copy under
+// npm root -g rather than upgrade that one.
+func nativeRelease(name, real string) (string, bool) {
+	// Remote paths are POSIX; path, not filepath.
+	real = path.Clean(real)
 	switch name {
-	case "codex", "claude", "agent", "opencode":
-		return name, true
-	case "cursor-agent":
-		return "cursor_agent", true
-	default:
-		return "", false
+	case "codex":
+		if strings.Contains(real, "/standalone/") {
+			return "codex", true
+		}
+	case "claude":
+		if strings.Contains(real, "/.local/share/claude/versions/") {
+			return "claude", true
+		}
+	case "agent", "cursor-agent":
+		if strings.Contains(real, "/.local/share/cursor-agent/versions/") {
+			return strings.ReplaceAll(name, "-", "_"), true
+		}
 	}
+	return "", false
 }
 
 func releaseStage(id string) StagePlan {
@@ -116,10 +136,6 @@ func releaseStage(id string) StagePlan {
 		// GitHub rust-v<version> is the fallback. Apply flips the standalone current link.
 		fetchDisplay = "curl -fsSL https://releases.openai.com/codex/releases/<version>/codex-package-<triple>.tar.gz"
 		applyDisplay = "swap staged Codex package into place"
-	case "opencode":
-		// opencode.ai's npm channel is 2.x. GitHub latest can still be 1.x.
-		fetchDisplay = "curl -fsSL https://opencode.ai/update/api/latest/cli/npm && npm pack @opencode/cli@<version>"
-		applyDisplay = "swap staged OpenCode package into place"
 	case "claude":
 		// downloads.claude.ai publishes manifest.json (sha256 per platform) and
 		// the binary at <version>/<platform>/claude. Apply drops it in

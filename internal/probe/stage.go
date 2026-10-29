@@ -500,7 +500,7 @@ func validStageStep(step StageStep) error {
 			return fmt.Errorf("refusing unsafe brew target %q", step.BrewToken)
 		}
 	case catalog.KindRelease:
-		if step.Release != "codex" && step.Release != "claude" && step.Release != "agent" && step.Release != "cursor_agent" && step.Release != "opencode" {
+		if step.Release != "codex" && step.Release != "claude" && step.Release != "agent" && step.Release != "cursor_agent" {
 			return fmt.Errorf("unknown release %q", step.Release)
 		}
 	default:

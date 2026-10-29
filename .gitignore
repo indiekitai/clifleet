@@ -9,3 +9,6 @@ coverage.out
 .DS_Store
 *.swp
 /vendor/
+
+# Local review notes; they list unfixed issues and stay out of the public repo.
+/docs/reviews/

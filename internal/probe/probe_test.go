@@ -12,6 +12,7 @@ import (
 )
 
 func TestProbeScriptIsReadOnly(t *testing.T) {
+	withProductionPaths(t)
 	script, err := ProbeScript([]Tool{{Name: "claude", Binary: "claude"}}, []string{"/opt/custom/bin"})
 	if err != nil {
 		t.Fatal(err)
@@ -337,6 +338,45 @@ func TestLoginPathSurvivesNvmAndBrewShellenv(t *testing.T) {
 	}
 	if !obs["claude"].Present || ShortVersion(obs["claude"].Version) != "9.9.9" {
 		t.Fatalf("brew shellenv was not applied: %+v\n%s", obs["claude"], out)
+	}
+}
+
+// brew shellenv prepends its own bin. A path_extra directory the host asked
+// for must still win, or probe and apply act on Homebrew's copy instead.
+func TestPathExtraWinsOverBrewShellenv(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	linuxbrew := filepath.Join(home, ".linuxbrew", "bin")
+	brewonly := filepath.Join(home, "brewonly")
+	extra := filepath.Join(root, "extra")
+	for _, d := range []string{linuxbrew, brewonly, extra} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExe(t, filepath.Join(linuxbrew, "brew"), "#!/bin/sh\nif [ \"$1\" = shellenv ]; then\n  printf 'export PATH=\"%s/brewonly:$PATH\"\\n' \"$HOME\"\n  exit 0\nfi\nexit 1\n")
+	writeExe(t, filepath.Join(brewonly, "claude"), "#!/bin/sh\nprintf '1.0.0\\n'\n")
+	writeExe(t, filepath.Join(extra, "claude"), "#!/bin/sh\nprintf '2.0.0\\n'\n")
+	script, err := ProbeScript([]Tool{{Name: "claude", Binary: "claude"}}, []string{extra})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-s")
+	cmd.Stdin = strings.NewReader(script)
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + home}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("probe failed: %v\n%s", err, out)
+	}
+	obs, err := ParseProbe(string(out))
+	if err != nil {
+		t.Fatalf("parse: %v\n%s", err, out)
+	}
+	if obs["claude"].Path != filepath.Join(extra, "claude") {
+		t.Fatalf("path_extra lost to brew shellenv: %+v\n%s", obs["claude"], out)
 	}
 }
 
