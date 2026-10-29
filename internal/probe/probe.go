@@ -94,6 +94,33 @@ var shimPathDirs = []string{
 }
 
 const scriptFns = `
+# cf_rmtree PATH is the only rm -rf in these scripts. Helpers share global
+# variables, so a path one of them clobbered or left empty must not become
+# rm -rf of /, $HOME, or a parent of $HOME. It also refuses relative paths
+# and . or .. components, and says so on stderr.
+cf_rmtree() {
+  cf_rt_p=$1
+  while :; do
+    case $cf_rt_p in
+      ?*/) cf_rt_p=${cf_rt_p%/} ;;
+      *) break ;;
+    esac
+  done
+  case $cf_rt_p in
+    '' | / | [!/]* | */. | */./* | */.. | */../*)
+      printf 'clifleet: refused to remove %s\n' "$1" >&2
+      return 1
+      ;;
+  esac
+  case ${HOME:-/}/ in
+    "$cf_rt_p"/*)
+      printf 'clifleet: refused to remove %s\n' "$1" >&2
+      return 1
+      ;;
+  esac
+  rm -rf "$cf_rt_p"
+}
+
 # cf_kill_tree PID stops PID and everything it started. Killing only PID
 # leaves the downloads and package managers a capped function started
 # running as orphans. The tree is read before the first signal, because once
@@ -557,8 +584,8 @@ mkdir -p "$cf_dir" || {
   printf '%s\n' 'clifleet: cannot create temp dir' >&2
   exit 1
 }
-trap 'rm -rf "$cf_dir"' EXIT
-trap 'rm -rf "$cf_dir"; exit 143' INT TERM
+trap 'cf_rmtree "$cf_dir"' EXIT
+trap 'cf_rmtree "$cf_dir"; exit 143' INT TERM
 cf_login_path
 cf_brew_env
 if [ -n "${HOME:-}" ] && [ -s "$HOME/.nvm/nvm.sh" ]; then

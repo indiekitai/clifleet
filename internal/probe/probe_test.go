@@ -556,6 +556,51 @@ func TestShellAwkHasNoRegexIntervals(t *testing.T) {
 	}
 }
 
+// Every recursive delete goes through cf_rmtree, the one place that refuses
+// /, $HOME and its parents. A raw one added later fails here.
+func TestShellDeletesTreesOnlyThroughRmtree(t *testing.T) {
+	raw := regexp.MustCompile(`\brm\s+-[a-zA-Z]*[rR]|-delete\b`)
+	found := 0
+	for name, src := range map[string]string{
+		"scriptPrelude": scriptPrelude, "scriptFns": scriptFns, "brewEnvSnippet": brewEnvSnippet, "nvmSnippet": nvmSnippet,
+		"applySafeShell": applySafeShell, "codexPackShell": codexPackShell,
+		"stagePrelude": stagePrelude, "fetchFns": fetchFns, "applyFns": applyFns,
+	} {
+		for _, line := range strings.Split(src, "\n") {
+			code := strings.TrimSpace(line)
+			if strings.HasPrefix(code, "#") || !raw.MatchString(code) {
+				continue
+			}
+			if name == "scriptFns" && code == `rm -rf "$cf_rt_p"` {
+				found++
+				continue
+			}
+			t.Errorf("%s deletes a tree without cf_rmtree: %s", name, code)
+		}
+	}
+	if found != 1 {
+		t.Fatalf("cf_rmtree itself should hold the only rm -rf, found %d", found)
+	}
+}
+
+func TestRmtreeRefusesDangerousPaths(t *testing.T) {
+	root := t.TempDir()
+	body := scriptFns + `
+mkdir -p "$HOME/keep" "$HOME/work/a/b"
+cd "$HOME/work"
+for p in "" / // relative a "$HOME" "$HOME/" "$(dirname "$HOME")" "$(dirname "$HOME")/" "$HOME/work/a/.." "$HOME/work/./a" "$HOME/work/a/../a"; do
+  if cf_rmtree "$p" 2>/dev/null; then echo "removed [$p]"; fi
+done
+[ -d "$HOME/keep" ] && [ -d "$HOME/work/a/b" ] && echo intact
+cf_rmtree "$HOME/work/a/" && [ ! -e "$HOME/work/a" ] && echo removed-ok
+cf_rmtree "$HOME/work/missing" && echo missing-ok
+`
+	out := runSh(t, body, []string{"PATH=/usr/bin:/bin", "HOME=" + filepath.Join(root, "home")})
+	if strings.Contains(out, "removed [") || !strings.Contains(out, "intact") || !strings.Contains(out, "removed-ok") || !strings.Contains(out, "missing-ok") {
+		t.Fatalf("cf_rmtree:\n%s", out)
+	}
+}
+
 func TestManifestChecksumWithoutIntervals(t *testing.T) {
 	root := t.TempDir()
 	want := strings.Repeat("ab", 32)

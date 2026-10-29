@@ -91,7 +91,7 @@ stage_npm() {
   pkg=$2
   root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
   dest="$root/npm/$tool"
-  rm -rf "$dest" || { cf_report fetch "$tool" 1 "could not reset cache"; return 0; }
+  cf_rmtree "$dest" || { cf_report fetch "$tool" 1 "could not reset cache"; return 0; }
   mkdir -p "$dest" "$root/staged" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
   file=$(npm pack --loglevel=error --pack-destination "$dest" "$pkg@latest" </dev/null) || {
     cf_report fetch "$tool" 1 "npm pack failed"

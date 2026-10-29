@@ -208,14 +208,14 @@ cf_restore_labeled() {
   cf_rl_prev=$cf_rl_parent/.clifleet-$2-prev
   if [ -d "$cf_rl_prev" ]; then
     cf_rl_failed=$cf_rl_parent/.clifleet-$2-failed
-    rm -rf "$cf_rl_failed"
+    cf_rmtree "$cf_rl_failed"
     mv "$cf_rl_dest" "$cf_rl_failed" 2>/dev/null || true
     if [ -e "$cf_rl_dest" ] || [ -L "$cf_rl_dest" ]; then
       # mv would nest prev inside the failed package instead of replacing it.
       return 1
     fi
     mv "$cf_rl_prev" "$cf_rl_dest" || return 1
-    rm -rf "$cf_rl_failed"
+    cf_rmtree "$cf_rl_failed"
   fi
 }
 
@@ -227,7 +227,7 @@ cf_restore_labeled() {
 cf_swap_undo() {
   cf_su_prev=$(dirname "$1")/.clifleet-$2-prev
   if [ -z "$3" ]; then
-    rm -rf "$1"
+    cf_rmtree "$1"
     if [ ! -e "$1" ] && [ ! -L "$1" ]; then
       return 0
     fi
@@ -585,7 +585,7 @@ cf_clear_npm_junk() {
   for junk in "$parent"/."$name"-*; do
     [ -e "$junk" ] || continue
     case $(basename "$junk") in
-      .$name-*) rm -rf "$junk" ;;
+      .$name-*) cf_rmtree "$junk" ;;
     esac
   done
   set -f
@@ -600,7 +600,7 @@ cf_npm_swap() {
   cf_sw_main_existed=
   cf_sw_plat_existed=
   prefix=$cf_dir/npm-prefix
-  rm -rf "$prefix"
+  cf_rmtree "$prefix"
   mkdir -p "$prefix" || { cf_swap_err="could not create temp prefix"; return 1; }
   if [ -n "$plat_tarball" ] && [ "$plat_tarball" != - ] && [ -f "$plat_tarball" ]; then
     if ! npm install -g --prefix "$prefix" --include=optional --no-fund --no-audit "$tarball" "$plat_tarball" </dev/null >&2; then
@@ -638,13 +638,13 @@ cf_npm_swap() {
   if [ ! -e "$dest" ] && [ -d "$prev" ]; then
     mv "$prev" "$dest" || true
   fi
-  rm -rf "$stage"
+  cf_rmtree "$stage"
   cp -a "$src" "$stage" || { cf_swap_err="could not stage package on the install filesystem"; return 1; }
   if [ -e "$dest" ] || [ -L "$dest" ]; then
     cf_sw_main_existed=1
-    rm -rf "$prev"
+    cf_rmtree "$prev"
     if ! mv "$dest" "$prev"; then
-      rm -rf "$stage"
+      cf_rmtree "$stage"
       cf_swap_err="could not move current package aside"
       return 1
     fi
@@ -669,7 +669,7 @@ cf_npm_swap() {
       mkdir -p "$pparent" || { cf_swap_err="could not create platform dir"; cf_swap_undo "$dest" "$tool" "$cf_sw_main_existed"; return 1; }
       pstage=$pparent/.clifleet-plat-new
       pprev=$pparent/.clifleet-plat-prev
-      rm -rf "$pstage"
+      cf_rmtree "$pstage"
       if ! cp -a "$psrc" "$pstage"; then
         cf_swap_err="could not stage platform package"
         cf_swap_undo "$dest" "$tool" "$cf_sw_main_existed"
@@ -677,9 +677,9 @@ cf_npm_swap() {
       fi
       if [ -e "$plat_dest" ] || [ -L "$plat_dest" ]; then
         cf_sw_plat_existed=1
-        rm -rf "$pprev"
+        cf_rmtree "$pprev"
         if ! mv "$plat_dest" "$pprev"; then
-          rm -rf "$pstage"
+          cf_rmtree "$pstage"
           cf_swap_err="could not move platform package aside"
           cf_swap_undo "$dest" "$tool" "$cf_sw_main_existed"
           return 1
@@ -715,9 +715,9 @@ cf_npm_swap() {
       return 1
     fi
   fi
-  rm -rf "$prev"
+  cf_rmtree "$prev"
   if [ -n "$plat_dest" ]; then
-    rm -rf "$(dirname "$plat_dest")/.clifleet-plat-prev"
+    cf_rmtree "$(dirname "$plat_dest")/.clifleet-plat-prev"
   fi
   return 0
 }
@@ -925,7 +925,7 @@ cf_release_fetch() {
   url="$base/$asset"
   root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
   dest="$root/release/$tool"
-  rm -rf "$dest"
+  cf_rmtree "$dest"
   mkdir -p "$dest" "$root/staged" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
   if ! cf_download "$dest/$asset" "$url"; then
     cf_report fetch "$tool" 1 "download failed"
@@ -952,7 +952,7 @@ stage_release_codex() {
   asset="codex-package-$target.tar.gz"
   root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
   dest="$root/release/$tool"
-  rm -rf "$dest"
+  cf_rmtree "$dest"
   mkdir -p "$dest" "$root/staged" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
   if ! cf_download "$dest/channel.json" "https://releases.openai.com/codex/channels/latest"; then
     cf_report fetch "$tool" 1 "could not read Codex release channel"
@@ -990,7 +990,7 @@ stage_release_claude() {
   tool=$1
   root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
   dest="$root/release/$tool"
-  rm -rf "$dest"
+  cf_rmtree "$dest"
   mkdir -p "$dest" "$root/staged" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
   plat=$(cf_claude_platform) || {
     cf_report fetch "$tool" blocked "no Claude release for $(uname -s)/$(uname -m)"
@@ -1051,7 +1051,7 @@ cf_stage_cursor_agent() {
   tool=$1
   root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
   dest="$root/release/$tool"
-  rm -rf "$dest"
+  cf_rmtree "$dest"
   mkdir -p "$dest" "$root/staged" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
   pair=$(cf_cursor_platform) || {
     cf_report fetch "$tool" blocked "no Cursor Agent build for $(uname -s)/$(uname -m)"
@@ -1110,7 +1110,7 @@ cf_read_release_stamp() {
 cf_extract_archive() {
   archive=$1
   extract=$cf_dir/extract
-  rm -rf "$extract"
+  cf_rmtree "$extract"
   mkdir -p "$extract" || return 1
   tar -xzf "$archive" -C "$extract" || return 1
   printf '%s\n' "$extract"
@@ -1210,17 +1210,17 @@ apply_release_codex() {
   else
     mkdir -p "$rel" || { cf_report apply "$tool" 1 "could not create Codex releases dir"; return 0; }
     stage="$rel/.staging.$$"
-    rm -rf "$stage"
+    cf_rmtree "$stage"
     mkdir -p "$stage" || { cf_report apply "$tool" 1 "could not stage Codex release"; return 0; }
-    cp -a "$extract"/. "$stage"/ || { rm -rf "$stage"; cf_report apply "$tool" 1 "could not copy Codex release"; return 0; }
+    cp -a "$extract"/. "$stage"/ || { cf_rmtree "$stage"; cf_report apply "$tool" 1 "could not copy Codex release"; return 0; }
     if [ ! -e "$stage/codex" ]; then
       ln -sf bin/codex "$stage/codex"
     fi
     if [ -e "$dest" ] || [ -L "$dest" ]; then
-      rm -rf "$dest"
+      cf_rmtree "$dest"
     fi
     if ! mv "$stage" "$dest"; then
-      rm -rf "$stage"
+      cf_rmtree "$stage"
       cf_report apply "$tool" 1 "could not publish Codex release"
       return 0
     fi
@@ -1435,16 +1435,16 @@ cf_apply_cursor_agent() {
   if [ -z "$cf_ca_in_use" ] || [ ! -x "$final/cursor-agent" ]; then
     mkdir -p "$versions" || { cf_report apply "$tool" 1 "could not create Cursor Agent versions dir"; return 0; }
     stage="$versions/.tmp-$ver"
-    rm -rf "$stage"
+    cf_rmtree "$stage"
     mkdir -p "$stage" || { cf_report apply "$tool" 1 "could not stage Cursor Agent"; return 0; }
     bindir=$(dirname "$bin")
-    cp -a "$bindir"/. "$stage"/ || { rm -rf "$stage"; cf_report apply "$tool" 1 "could not copy Cursor Agent"; return 0; }
+    cp -a "$bindir"/. "$stage"/ || { cf_rmtree "$stage"; cf_report apply "$tool" 1 "could not copy Cursor Agent"; return 0; }
     chmod 755 "$stage/cursor-agent" 2>/dev/null || true
     if [ -e "$final" ] || [ -L "$final" ]; then
-      rm -rf "$final"
+      cf_rmtree "$final"
     fi
     if ! mv "$stage" "$final"; then
-      rm -rf "$stage"
+      cf_rmtree "$stage"
       cf_report apply "$tool" 1 "could not publish Cursor Agent version"
       return 0
     fi
