@@ -33,7 +33,7 @@ Checked against `origin/main` on 2026-10-29 (Asia/Tokyo). Tip SHA, PR #2–#4 su
   - `3202b4e` + tag **`v0.2.0`**: `install.sh`, `clifleet update` (alias `self-update`), `SHA256SUMS` in releases, version from build info
   - `cb11ca0`: every recursive delete in remote scripts goes through `cf_rmtree`, which refuses empty, relative, `.`/`..`, `/`, `$HOME` and its parents (`TestShellDeletesTreesOnlyThroughRmtree` guards it)
   - `be8527c` + tag **`v0.2.1`**: release runs the tests first, Actions pinned to commit SHAs, build provenance attestation on the tarballs and `SHA256SUMS`; `install.sh` and `clifleet update` run `gh attestation verify` when gh is logged in (`CLIFLEET_NO_ATTESTATION=1` skips). Verified end to end 2026-10-29: release green, attestation verifies, install.sh and a real v0.2.0 → v0.2.1 update on Mac Studio
-  - 2026-10-29 night (not tagged yet): `clifleet history` + `history.jsonl` (every non-dry-run upgrade / fetch / apply, one line per host × tool); `skills/clifleet/SKILL.md` + `TestSkillNamesOnlyRealCommandsAndFlags`; terminal-only "newer clifleet available" notice (`CLIFLEET_NO_UPDATE_CHECK=1` off); `scripts/release-check.sh`
+  - Tag **`v0.2.2`** (2026-10-30, release green, release-check showed only the intended help changes): `clifleet history` + `history.jsonl` (every non-dry-run upgrade / fetch / apply, one line per host × tool); `skills/clifleet/SKILL.md` + `TestSkillNamesOnlyRealCommandsAndFlags`; terminal-only "newer clifleet available" notice (`CLIFLEET_NO_UPDATE_CHECK=1` off); `scripts/release-check.sh`
   - Before that: Ctrl-C is reported as `interrupted`, not `unreachable`; the kill-tree KILL trusts only PID+start time (BusyBox without `lstart` KILLs only a direct child that is still the watchdog's sibling); npm aliases keep their real package name; a staged run hit by Ctrl-C sets a host error, so it never exits 0
 - `1cad8412` — squash-merge of **PR #4** (*Harden staged apply against mise shims, keychain rollbacks, and summary counts*)
 - Prior merges worth knowing:
@@ -45,7 +45,8 @@ Open PRs: none at handoff time.
 
 ## Install on Fan's control machine (Mac Studio)
 
-- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.1`, updated 2026-10-29 with `clifleet update`)
+- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.2`, updated 2026-10-30 with `clifleet update`; SHA256SUMS and attestation verified). After that, `doctor` and `status` were ok on all four hosts with the same readings as below.
+- The 2026-10-29 13:31 apply report is kept as `~/.cache/clifleet/last-report-20261029-1331.json`; `last-report.json` now holds the latest status run.
 - Config: `~/.config/clifleet/hosts.toml` (timeout currently **`10m`**, concurrency `4`)
 - Cache / durable last run: `~/.cache/clifleet/last-report.json` plus `npm/`, `release/`, `staged/`
 - Control machine id for Cursor local tools: `4115756c-6089-4706-ab99-39b456da5650` (label Mac-Studio.local)
@@ -54,7 +55,7 @@ Open PRs: none at handoff time.
 - Untagged tip: `go install github.com/indiekitai/clifleet/cmd/clifleet@main` (reports a Go pseudo-version; `update` then moves it to the next release).
 
 A working clone lives at `/Users/tf/Documents/Fansen/clifleet`.
-- Agent skill: `skills/clifleet/SKILL.md` in the repo. For Claude Code sessions to load it: `ln -s /Users/tf/Documents/Fansen/clifleet/skills/clifleet ~/.claude/skills/clifleet` (not done yet; ask Fan, since a symlink does not survive `sync-config.sh` to other machines and every skill description costs context each turn).
+- Agent skill: `skills/clifleet/SKILL.md` in the repo. Fan decided 2026-10-30 not to install it into `~/.claude/skills`; it stays a repo file for other users and for reference.
 - Upgrade history: `~/.cache/clifleet/history.jsonl` starts with the next real upgrade; earlier runs are only in this file.
 
 ## Fleet (`hosts.toml`)
