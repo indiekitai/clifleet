@@ -8,15 +8,24 @@ This is not a single-machine updater ([aiupdate](https://github.com/narze/aiupda
 
 ## Install
 
-From a checkout:
+On macOS or Linux (amd64 / arm64), without Go:
 
 ```bash
-git clone https://github.com/indiekitai/clifleet.git
-cd clifleet
-go install ./cmd/clifleet
+curl -fsSL https://raw.githubusercontent.com/indiekitai/clifleet/main/install.sh | sh
 ```
 
-Or, once this module is public:
+It installs the latest release build to `~/.local/bin/clifleet`. `CLIFLEET_INSTALL_DIR` picks another directory and `CLIFLEET_VERSION=v0.2.0` pins a release. The archive must match the release's `SHA256SUMS` and the new binary must run before anything is replaced. Running the same line again upgrades.
+
+To upgrade an installed clifleet:
+
+```bash
+clifleet update --check   # print current and latest, change nothing
+clifleet update           # replace this binary with the latest release
+```
+
+`update` (alias `self-update`) only touches clifleet's own binary, never the CLIs on your hosts; `upgrade` is the one that upgrades the hosts. A clifleet built from source reports `dev` (or the Go pseudo-version `go install` recorded) and is left alone unless you pass `--force`.
+
+With Go:
 
 ```bash
 go install github.com/indiekitai/clifleet/cmd/clifleet@latest

@@ -22,8 +22,9 @@ import (
 	"github.com/indiekitai/clifleet/internal/table"
 )
 
-// Version is the released version, overridable with -ldflags.
-var Version = "0.1.0"
+// Version is stamped by release builds with -ldflags -X. Other builds
+// report what version() finds.
+var Version = ""
 
 // Execute runs clifleet and returns the process exit code.
 func Execute(args []string, stdout, stderr io.Writer) int {
@@ -40,7 +41,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	}
 	switch args[0] {
 	case "-V", "--version", "version":
-		fmt.Fprintf(stdout, "clifleet %s\n", Version)
+		fmt.Fprintf(stdout, "clifleet %s\n", version())
 		return 0
 	case "init":
 		return cmdInit(args[1:], stdout, stderr)
@@ -54,6 +55,8 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		return cmdFleet(append([]string{"--apply"}, args[1:]...), stdout, stderr, true)
 	case "doctor":
 		return cmdDoctor(args[1:], stdout, stderr)
+	case "update", "self-update":
+		return cmdSelfUpdate(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "clifleet: unknown command %q\n\n%s", args[0], rootHelp)
 		return 1
@@ -66,13 +69,14 @@ Usage:
   clifleet <command> [flags]
 
 Commands:
-  init       Write an example fleet file
-  status     Show host × tool × version × install method
-  upgrade    Upgrade CLIs that are already installed
-  fetch      Stage upgrade artifacts (same as upgrade --fetch)
-  apply      Install staged artifacts (same as upgrade --apply)
-  doctor     Check SSH, the fleet file, and reachability
-  version    Print the clifleet version
+  init         Write an example fleet file
+  status       Show host × tool × version × install method
+  upgrade      Upgrade the CLIs already installed on each host
+  fetch        Stage upgrade artifacts (same as upgrade --fetch)
+  apply        Install staged artifacts (same as upgrade --apply)
+  doctor       Check SSH, the fleet file, and reachability
+  update       Update clifleet itself to the latest release (not the hosts)
+  version      Print the clifleet version
 
 clifleet looks at each machine separately. A tool that is not installed
 there is skipped. Nothing in the candidate list is installed for you,
@@ -87,6 +91,7 @@ Examples:
   clifleet upgrade --apply
   clifleet upgrade --only claude --hosts us-server
   clifleet doctor
+  clifleet update --check
 
 Run 'clifleet <command> --help' for command flags.
 `

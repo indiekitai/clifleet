@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/indiekitai/clifleet/internal/config"
+	"github.com/indiekitai/clifleet/internal/selfupdate"
 )
 
 var testCache string
@@ -110,7 +113,7 @@ func TestHelpAndVersion(t *testing.T) {
 		t.Fatalf("root help %d %s", code, out.String())
 	}
 	out.Reset()
-	if code := Execute([]string{"version"}, &out, &errBuf); code != 0 || !strings.Contains(out.String(), Version) {
+	if code := Execute([]string{"version"}, &out, &errBuf); code != 0 || out.String() != "clifleet "+version()+"\n" || version() == "" {
 		t.Fatal(out.String())
 	}
 	errBuf.Reset()
@@ -239,5 +242,43 @@ func TestDoctorTimesOutAHungHost(t *testing.T) {
 	}
 	if code != 2 || !strings.Contains(out.String(), "timed out after 1s") {
 		t.Fatalf("exit %d\n%s\n%s", code, out.String(), errBuf.String())
+	}
+}
+
+func TestSelfUpdateChecksAndLeavesASourceBuild(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/releases/latest" {
+			http.Redirect(w, req, "/releases/tag/v9.9.9", http.StatusFound)
+			return
+		}
+		http.NotFound(w, req)
+	}))
+	defer srv.Close()
+	oldURL, oldPath, oldVersion := selfupdate.BaseURL, selfPath, Version
+	defer func() { selfupdate.BaseURL, selfPath, Version = oldURL, oldPath, oldVersion }()
+	selfupdate.BaseURL = srv.URL + "/releases"
+	target := filepath.Join(t.TempDir(), "clifleet")
+	if err := os.WriteFile(target, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	selfPath = func() (string, error) { return target, nil }
+
+	Version = "dev"
+	var out, errBuf bytes.Buffer
+	if code := Execute([]string{"update", "--check"}, &out, &errBuf); code != 0 || !strings.Contains(out.String(), "latest release is v9.9.9") {
+		t.Fatalf("check %d %s %s", code, out.String(), errBuf.String())
+	}
+	out.Reset()
+	errBuf.Reset()
+	if code := Execute([]string{"update"}, &out, &errBuf); code != 2 || !strings.Contains(errBuf.String(), "--force") {
+		t.Fatalf("source build %d %s %s", code, out.String(), errBuf.String())
+	}
+	out.Reset()
+	Version = "v9.9.9"
+	if code := Execute([]string{"self-update"}, &out, &errBuf); code != 0 || !strings.Contains(out.String(), "is current") {
+		t.Fatalf("current %d %s", code, out.String())
+	}
+	if got, _ := os.ReadFile(target); string(got) != "old" {
+		t.Fatalf("replaced: %q", got)
 	}
 }

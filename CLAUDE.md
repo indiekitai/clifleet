@@ -33,7 +33,9 @@ sandbox-exec -D HOME="$HOME" -p '(version 1)(allow default)(deny file-write* (su
 
 A new test that runs a script must pass its fake `bin` as `path_extra` and set `HOME` to a temp dir. `runSh` has a 1-minute deadline, so a fake that is being shadowed by a real binary shows up as a fast failure, not a hang.
 
-`internal/cli.Version` defaults to `"0.1.0"`; release builds stamp it via `-ldflags -X github.com/indiekitai/clifleet/internal/cli.Version=<tag>` on `v*` tags (`release.yml`).
+Release builds stamp `internal/cli.Version` via `-ldflags -X github.com/indiekitai/clifleet/internal/cli.Version=<tag>` on `v*` tags (`release.yml`, which also publishes `SHA256SUMS`). Unstamped builds report the module version `go install` recorded, else `dev`. Pushing a `v*` tag is a release: `install.sh` and `clifleet update` pick up the newest one.
+
+`internal/selfupdate` (behind `clifleet update`, alias `self-update`; `upgrade` is the fleet command) and `install.sh` only ever replace clifleet's own binary: SHA256SUMS must match, and the new binary must print `clifleet <tag>` before the rename. Its tests run against `httptest` and a fake `curl`; a CLI test must point `selfPath` at a temp file, or it would overwrite the test binary.
 
 ## Architecture
 
