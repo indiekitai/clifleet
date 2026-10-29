@@ -356,7 +356,7 @@ go vet ./...
 CGO_ENABLED=0 go build -o clifleet ./cmd/clifleet
 ```
 
-GitHub Actions (`.github/workflows/ci.yml`) runs those on every push. See [CONTRIBUTING.md](CONTRIBUTING.md).
+GitHub Actions (`.github/workflows/ci.yml`) runs those on every push. Before tagging a release, `scripts/release-check.sh ./clifleet` runs `--help`, `status --json`, and `upgrade --dry-run --json` with your installed clifleet and the new build against your own fleet and prints any difference; nothing is upgraded, and `last-report.json` is put back. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Maintainer
 

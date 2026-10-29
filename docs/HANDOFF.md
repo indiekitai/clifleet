@@ -19,7 +19,7 @@ Operational state for whoever maintains the **public product** and Fan's **perso
 - Default branch: `main`
 - Topics on GitHub: `cli`, `ssh`, `fleet`, `claude-code`, `codex`, `opencode`, `golang` (done)
 - CI: `.github/workflows/ci.yml`
-- Release: `.github/workflows/release.yml` (Linux/macOS amd64+arm64). Tag `v0.1.0` was part of the original handoff. `go install` of a later squash commit still prints `0.1.0` because `internal/cli.Version` defaults to that string. Tag builds already pass `-X github.com/indiekitai/clifleet/internal/cli.Version=${GITHUB_REF_NAME}`; an untagged install does not.
+- Release: `.github/workflows/release.yml` (Linux/macOS amd64+arm64). Tag builds stamp `-X github.com/indiekitai/clifleet/internal/cli.Version=${GITHUB_REF_NAME}`; an untagged `go install` reports the Go module version (pseudo-version), a plain source build `dev`. Before tagging, run `scripts/release-check.sh <new build>`: it runs `--help`, `status --json`, and `upgrade --dry-run --json` with the installed and the new binary on the real fleet, diffs them, and puts `last-report.json` back.
 
 ### Current tip (as of handoff)
 
@@ -33,6 +33,7 @@ Checked against `origin/main` on 2026-10-29 (Asia/Tokyo). Tip SHA, PR #2–#4 su
   - `3202b4e` + tag **`v0.2.0`**: `install.sh`, `clifleet update` (alias `self-update`), `SHA256SUMS` in releases, version from build info
   - `cb11ca0`: every recursive delete in remote scripts goes through `cf_rmtree`, which refuses empty, relative, `.`/`..`, `/`, `$HOME` and its parents (`TestShellDeletesTreesOnlyThroughRmtree` guards it)
   - `be8527c` + tag **`v0.2.1`**: release runs the tests first, Actions pinned to commit SHAs, build provenance attestation on the tarballs and `SHA256SUMS`; `install.sh` and `clifleet update` run `gh attestation verify` when gh is logged in (`CLIFLEET_NO_ATTESTATION=1` skips). Verified end to end 2026-10-29: release green, attestation verifies, install.sh and a real v0.2.0 → v0.2.1 update on Mac Studio
+  - 2026-10-29 night (not tagged yet): `clifleet history` + `history.jsonl` (every non-dry-run upgrade / fetch / apply, one line per host × tool); `skills/clifleet/SKILL.md` + `TestSkillNamesOnlyRealCommandsAndFlags`; terminal-only "newer clifleet available" notice (`CLIFLEET_NO_UPDATE_CHECK=1` off); `scripts/release-check.sh`
   - Before that: Ctrl-C is reported as `interrupted`, not `unreachable`; the kill-tree KILL trusts only PID+start time (BusyBox without `lstart` KILLs only a direct child that is still the watchdog's sibling); npm aliases keep their real package name; a staged run hit by Ctrl-C sets a host error, so it never exits 0
 - `1cad8412` — squash-merge of **PR #4** (*Harden staged apply against mise shims, keychain rollbacks, and summary counts*)
 - Prior merges worth knowing:
@@ -52,7 +53,9 @@ Open PRs: none at handoff time.
 - Fresh machine, no Go: `curl -fsSL https://raw.githubusercontent.com/indiekitai/clifleet/main/install.sh | sh` (add `CLIFLEET_INSTALL_DIR=$HOME/go/bin` to keep this machine's path).
 - Untagged tip: `go install github.com/indiekitai/clifleet/cmd/clifleet@main` (reports a Go pseudo-version; `update` then moves it to the next release).
 
-A working clone now lives at `/Users/tf/Documents/Fansen/clifleet`.
+A working clone lives at `/Users/tf/Documents/Fansen/clifleet`.
+- Agent skill: `skills/clifleet/SKILL.md` in the repo. For Claude Code sessions to load it: `ln -s /Users/tf/Documents/Fansen/clifleet/skills/clifleet ~/.claude/skills/clifleet` (not done yet; ask Fan, since a symlink does not survive `sync-config.sh` to other machines and every skill description costs context each turn).
+- Upgrade history: `~/.cache/clifleet/history.jsonl` starts with the next real upgrade; earlier runs are only in this file.
 
 ## Fleet (`hosts.toml`)
 
@@ -76,6 +79,15 @@ These override generic “ask first” habits for **this** product:
 3. **Never finish silently.** Always send a short completion update when a batch ends (Fan hates having to ask 「还没好吗」).
 4. **Download-then-atomic-swap** is the product expectation. Prefer staged `--fetch` then `--apply`. Avoid disruptive `--one-shot` / in-place updaters unless Fan asks.
 5. Suggested ops pattern he already used: **fetch first**, report, then apply when he says so (e.g. 「全部 apply」). Do not invent a long unattended apply without timing OK.
+
+## Fleet status (2026-10-29 22:37 JST, read-only)
+
+From `scripts/release-check.sh` (`status --json` + `upgrade --dry-run --json`, all four hosts reachable, exit 0; v0.2.1 and the new build printed the same). Newest seen: claude 2.1.312, codex 0.165.0, opencode 2.2.0, agent/cursor-agent 2026.10.22, pi 1.4.0.
+
+- **mac-studio, claw1:** five-pack current.
+- **mbp:** claude **2.1.296**, opencode **1.18.20** (brew); agent / cursor-agent version unreadable (`keychain locked`). Dry-run would stage claude, codex, agent, cursor-agent (release), opencode (brew), pi (npm).
+- **omarchy:** codex **0.162.1** and opencode **2.1.3** are native but `no-stage` (not in the vendor release layout), pi **1.3.0** `no-stage`; only `--one-shot` (or the host itself, e.g. `mise upgrade`) would move them. claude / agent / cursor-agent current.
+- Next real run, once Fan OKs timing: `clifleet upgrade --fetch --hosts mbp --only claude,opencode,pi --timeout 20m`, report, then `--apply`.
 
 ## Last fleet run (2026-10-29 ~13:31 JST)
 
@@ -106,7 +118,6 @@ PR #4 diagnostics that did help: `keychain locked` surfaces; mise shows in `vers
 | mbp login keychain locked over SSH | Host | agent/`cursor-agent` version probe / some applies painful | Unlock keychain on mbp (or run apply from an unlocked GUI session) |
 | omarchy codex behind mise | Host / policy | clifleet correctly **refuses** to replace the mise binary | `mise upgrade codex` (or install a real standalone and stop using the shim) |
 | claw1 openclaw Node engines too old | Host | fetch `blocked (needs Node …)` | Upgrade Node on claw1; clifleet will not bump Node |
-| No local Fansen checkout | Ops | Agents may look in the wrong place | Prefer GitHub + `go install`; optional clone only if Fan asks |
 
 ## Safe command cheat sheet
 
@@ -135,13 +146,15 @@ Always `set -o pipefail` if piping through `tee`. Read `last-report.json` after 
 - Do not start a long fleet fetch/apply without Fan's timing confirmation.
 - Do not silently end a maintenance batch.
 
-## Backlog (decided 2026-10-29, not started)
+## Backlog
 
-From comparing with Mole (`docs/reviews/2026-10-29-参考-Mole.md`, local only). Done: rm guard (`cf_rmtree`), release hardening (v0.2.1). Next, in order:
+From comparing with Mole (`docs/reviews/2026-10-29-参考-Mole.md`, local only). Done 2026-10-29: rm guard (`cf_rmtree`), release hardening (v0.2.1), agent skill + help test, upgrade history, newer-release notice, `scripts/release-check.sh`.
 
-1. Agent skill for clifleet: a SKILL.md that says `status` / `--dry-run` first, confirm timing with Fan before a real upgrade, prefer `--fetch` then `--apply`, read `last-report.json`; plus a test that every command and flag it names exists in `--help`.
-2. Upgrade history: append-only log of each upgrade run per host/tool, and `clifleet history [--json] [--limit N]`.
-3. Maybe: a passive "newer clifleet available" notice, and a release-check script.
+Left, none started (from the code review, `docs/reviews/2026-10-29-代码审查.md`, local only):
+
+1. Move the remote shell out of Go strings into `go:embed` `.sh` files, then run `shellcheck -s sh` / `dash -n` / `checkbashisms` in CI.
+2. Remote lock per host: stops two concurrent applies on one machine and gives a Ctrl-C'd run's remote step a way to stop.
+3. Smaller: `hostRun` struct for the shared parameters of `finishStage` / `finishSafe` / `runStageSteps` / `oneHost`; an AGENTS.md pointing Codex at CLAUDE.md.
 
 ## Suggested first week for the next maintainer
 
