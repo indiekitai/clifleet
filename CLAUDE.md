@@ -35,7 +35,7 @@ A new test that runs a script must pass its fake `bin` as `path_extra` and set `
 
 Release builds stamp `internal/cli.Version` via `-ldflags -X github.com/indiekitai/clifleet/internal/cli.Version=<tag>` on `v*` tags (`release.yml`, which also publishes `SHA256SUMS`). Unstamped builds report the module version `go install` recorded, else `dev`. Pushing a `v*` tag is a release: `install.sh` and `clifleet update` pick up the newest one.
 
-`internal/selfupdate` (behind `clifleet update`, alias `self-update`; `upgrade` is the fleet command) and `install.sh` only ever replace clifleet's own binary: SHA256SUMS must match, and the new binary must print `clifleet <tag>` before the rename. Its tests run against `httptest` and a fake `curl`; a CLI test must point `selfPath` at a temp file, or it would overwrite the test binary.
+`internal/selfupdate` (behind `clifleet update`, alias `self-update`; `upgrade` is the fleet command) and `install.sh` only ever replace clifleet's own binary: SHA256SUMS must match, a logged-in `gh` must confirm the build attestation (`release.yml` signs every tarball and SHA256SUMS), and the new binary must print `clifleet <tag>` before the rename. Workflow actions are pinned to commit SHAs; keep them pinned when bumping. Its tests run against `httptest`, a fake `curl` and a fake `gh` (`TestMain` hides the real one); a CLI test must point `selfPath` at a temp file, or it would overwrite the test binary.
 
 ## Architecture
 

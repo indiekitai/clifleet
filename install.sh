@@ -5,8 +5,10 @@
 #
 # CLIFLEET_VERSION picks a tag (default: the latest release).
 # CLIFLEET_INSTALL_DIR picks the directory (default: ~/.local/bin).
-# The archive must match the release's SHA256SUMS, and the new binary must
-# run here before it replaces anything.
+# CLIFLEET_NO_ATTESTATION=1 skips the build attestation check.
+# The archive must match the release's SHA256SUMS (and, when gh is logged
+# in, its build attestation), and the new binary must run here before it
+# replaces anything.
 set -eu
 
 releases=https://github.com/indiekitai/clifleet/releases
@@ -59,6 +61,15 @@ else
   fail "sha256sum or shasum is required"
 fi
 [ "$got" = "$want" ] || fail "$name.tar.gz does not match SHA256SUMS of $tag; nothing was installed"
+# SHA256SUMS comes from the same release as the archive. With a logged-in gh,
+# also check that the release workflow of this repo built it.
+checked="SHA256SUMS"
+if [ -z "${CLIFLEET_NO_ATTESTATION:-}" ] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  gh attestation verify "$work/$name.tar.gz" --repo indiekitai/clifleet \
+    --signer-workflow indiekitai/clifleet/.github/workflows/release.yml >/dev/null 2>&1 \
+    || fail "$name.tar.gz of $tag has no valid build attestation from indiekitai/clifleet; nothing was installed (CLIFLEET_NO_ATTESTATION=1 relies on SHA256SUMS alone)"
+  checked="SHA256SUMS and build attestation"
+fi
 
 tar -xzf "$work/$name.tar.gz" -C "$work" "$name" || fail "$name is not in $name.tar.gz"
 mkdir -p "$dir"
@@ -70,7 +81,7 @@ if [ "$("$new" version 2>/dev/null || true)" != "clifleet $tag" ]; then
   fail "the $tag build does not run here; nothing was installed"
 fi
 mv -f "$new" "$dir/clifleet"
-printf 'installed clifleet %s to %s\n' "$tag" "$dir/clifleet"
+printf 'installed clifleet %s to %s (checked %s)\n' "$tag" "$dir/clifleet" "$checked"
 case ":$PATH:" in
   *":$dir:"*) ;;
   *) printf 'add %s to PATH to run it as clifleet\n' "$dir" ;;

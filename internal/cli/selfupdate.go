@@ -24,7 +24,9 @@ const selfUpdateHelp = `Usage:
 Replace this clifleet binary with the latest GitHub release build. Only
 clifleet itself is touched; the CLIs on your hosts are not (that is
 clifleet upgrade). self-update is the same command. The archive
-must match the release's SHA256SUMS and the new binary must run here
+must match the release's SHA256SUMS; when gh is installed and logged in,
+gh attestation verify must also confirm this repo's release workflow built
+it (CLIFLEET_NO_ATTESTATION=1 skips that). The new binary must run here
 before it replaces the old one. A clifleet built from source (version
 "dev") is left alone unless --force is set.
 
@@ -89,6 +91,7 @@ func cmdSelfUpdate(args []string, stdout, stderr io.Writer) int {
 	res, err := selfupdate.Update(ctx, selfupdate.Options{
 		Current: cur, Target: target, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH,
 		Check: check, Force: force,
+		NoAttestation: os.Getenv("CLIFLEET_NO_ATTESTATION") != "",
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "clifleet update: %s\n", err)
@@ -96,7 +99,11 @@ func cmdSelfUpdate(args []string, stdout, stderr io.Writer) int {
 	}
 	switch {
 	case res.Updated:
-		fmt.Fprintf(stdout, "clifleet %s → %s (%s)\n", cur, res.Latest, target)
+		checked := "SHA256SUMS"
+		if res.Attested {
+			checked += " and build attestation"
+		}
+		fmt.Fprintf(stdout, "clifleet %s → %s (%s; checked %s)\n", cur, res.Latest, target, checked)
 	case !res.Available:
 		fmt.Fprintf(stdout, "clifleet %s is current (latest release %s)\n", cur, res.Latest)
 	default:

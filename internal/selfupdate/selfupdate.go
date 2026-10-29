@@ -26,6 +26,14 @@ import (
 // BaseURL is the releases page. Tests point it at a local server.
 var BaseURL = "https://github.com/indiekitai/clifleet/releases"
 
+// GH is the gh binary that checks build attestations. Tests replace it.
+var GH = "gh"
+
+const (
+	repo           = "indiekitai/clifleet"
+	signerWorkflow = "indiekitai/clifleet/.github/workflows/release.yml"
+)
+
 const maxDownload = 64 << 20
 
 // Options says what to replace and how.
@@ -36,7 +44,9 @@ type Options struct {
 	GOARCH  string
 	Check   bool // report only
 	Force   bool // reinstall the same version, or replace a source build
-	Client  *http.Client
+	// NoAttestation skips gh attestation verify; SHA256SUMS is still checked.
+	NoAttestation bool
+	Client        *http.Client
 }
 
 // Result is what Update found and did.
@@ -45,11 +55,13 @@ type Result struct {
 	Latest    string
 	Available bool // Latest is newer, or Current is not a release version
 	Updated   bool
+	Attested  bool // gh confirmed the release workflow built the archive
 }
 
 // Update installs the latest release over o.Target when it is newer.
-// Nothing is replaced unless the archive matches SHA256SUMS and the new
-// binary runs and reports the release tag.
+// Nothing is replaced unless the archive matches SHA256SUMS, has a valid
+// build attestation when a logged-in gh is available, and the new binary
+// runs and reports the release tag.
 func Update(ctx context.Context, o Options) (Result, error) {
 	res := Result{Current: o.Current}
 	if !supported(o.GOOS, o.GOARCH) {
@@ -75,10 +87,12 @@ func Update(ctx context.Context, o Options) (Result, error) {
 	if ok && cmp >= 0 && !o.Force {
 		return res, nil
 	}
-	if err := install(ctx, client, latest, o); err != nil {
+	attested, err := install(ctx, client, latest, o)
+	if err != nil {
 		return res, err
 	}
 	res.Updated = true
+	res.Attested = attested
 	return res, nil
 }
 
@@ -111,43 +125,47 @@ func Latest(ctx context.Context, client *http.Client) (string, error) {
 	return tag, nil
 }
 
-func install(ctx context.Context, client *http.Client, tag string, o Options) error {
+func install(ctx context.Context, client *http.Client, tag string, o Options) (bool, error) {
 	name := fmt.Sprintf("clifleet_%s_%s", o.GOOS, o.GOARCH)
 	base := BaseURL + "/download/" + tag + "/"
 	sums, err := download(ctx, client, base+"SHA256SUMS")
 	if err != nil {
-		return err
+		return false, err
 	}
 	want, err := sumFor(sums, name+".tar.gz")
 	if err != nil {
-		return fmt.Errorf("%s: %w", tag, err)
+		return false, fmt.Errorf("%s: %w", tag, err)
 	}
 	archive, err := download(ctx, client, base+name+".tar.gz")
 	if err != nil {
-		return err
+		return false, err
 	}
 	got := sha256.Sum256(archive)
 	if hex.EncodeToString(got[:]) != want {
-		return fmt.Errorf("%s.tar.gz does not match SHA256SUMS of %s; nothing was replaced", name, tag)
+		return false, fmt.Errorf("%s.tar.gz does not match SHA256SUMS of %s; nothing was replaced", name, tag)
+	}
+	attested, err := attest(ctx, archive, name, tag, o.NoAttestation)
+	if err != nil {
+		return false, err
 	}
 	bin, err := extract(archive, name)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	tmp, err := os.CreateTemp(filepath.Dir(o.Target), ".clifleet-update-*")
 	if err != nil {
-		return fmt.Errorf("cannot write next to %s: %w", o.Target, err)
+		return false, fmt.Errorf("cannot write next to %s: %w", o.Target, err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	_, werr := tmp.Write(bin)
 	cerr := tmp.Close()
 	if werr != nil || cerr != nil {
-		return fmt.Errorf("write %s: %w", tmpName, errors.Join(werr, cerr))
+		return false, fmt.Errorf("write %s: %w", tmpName, errors.Join(werr, cerr))
 	}
 	if err := os.Chmod(tmpName, 0o755); err != nil {
-		return err
+		return false, err
 	}
 	// A binary for the wrong platform, or a broken one, must not replace a
 	// working clifleet.
@@ -155,12 +173,46 @@ func install(ctx context.Context, client *http.Client, tag string, o Options) er
 	defer cancel()
 	out, err := exec.CommandContext(vctx, tmpName, "version").Output()
 	if err != nil || strings.TrimSpace(string(out)) != "clifleet "+tag {
-		return fmt.Errorf("the %s build does not run here (%q, %v); nothing was replaced", tag, strings.TrimSpace(string(out)), err)
+		return false, fmt.Errorf("the %s build does not run here (%q, %v); nothing was replaced", tag, strings.TrimSpace(string(out)), err)
 	}
 	if err := os.Rename(tmpName, o.Target); err != nil {
-		return fmt.Errorf("replace %s: %w", o.Target, err)
+		return false, fmt.Errorf("replace %s: %w", o.Target, err)
 	}
-	return nil
+	return attested, nil
+}
+
+// attest runs gh attestation verify when gh is installed and logged in.
+// SHA256SUMS ships with the archive, so it only proves the download is
+// intact; the attestation proves this repo's release workflow built it.
+// Without gh there is nothing to check against, and that is not an error.
+func attest(ctx context.Context, archive []byte, name, tag string, skip bool) (bool, error) {
+	if skip {
+		return false, nil
+	}
+	gh, err := exec.LookPath(GH)
+	if err != nil {
+		return false, nil
+	}
+	actx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	if exec.CommandContext(actx, gh, "auth", "status").Run() != nil {
+		return false, nil
+	}
+	dir, err := os.MkdirTemp("", "clifleet-attest-*")
+	if err != nil {
+		return false, err
+	}
+	defer os.RemoveAll(dir)
+	file := filepath.Join(dir, name+".tar.gz")
+	if err := os.WriteFile(file, archive, 0o644); err != nil {
+		return false, err
+	}
+	out, err := exec.CommandContext(actx, gh, "attestation", "verify", file, "--repo", repo, "--signer-workflow", signerWorkflow).CombinedOutput()
+	if err != nil {
+		line, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+		return false, fmt.Errorf("%s.tar.gz of %s has no valid build attestation from %s (%s); nothing was replaced (CLIFLEET_NO_ATTESTATION=1 relies on SHA256SUMS alone)", name, tag, repo, line)
+	}
+	return true, nil
 }
 
 func download(ctx context.Context, client *http.Client, url string) ([]byte, error) {

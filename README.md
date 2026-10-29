@@ -14,7 +14,7 @@ On macOS or Linux (amd64 / arm64), without Go:
 curl -fsSL https://raw.githubusercontent.com/indiekitai/clifleet/main/install.sh | sh
 ```
 
-It installs the latest release build to `~/.local/bin/clifleet`. `CLIFLEET_INSTALL_DIR` picks another directory and `CLIFLEET_VERSION=v0.2.0` pins a release. The archive must match the release's `SHA256SUMS` and the new binary must run before anything is replaced. Running the same line again upgrades.
+It installs the latest release build to `~/.local/bin/clifleet`. `CLIFLEET_INSTALL_DIR` picks another directory and `CLIFLEET_VERSION=v0.2.0` pins a release. The archive must match the release's `SHA256SUMS`. When `gh` is installed and logged in, `gh attestation verify` must also confirm that this repo's release workflow built it (`CLIFLEET_NO_ATTESTATION=1` skips that check). The new binary must run before anything is replaced. Running the same line again upgrades.
 
 To upgrade an installed clifleet:
 

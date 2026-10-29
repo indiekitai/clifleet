@@ -203,6 +203,54 @@ func TestUpdateRejectsAPlatformWithoutABuild(t *testing.T) {
 	}
 }
 
+func TestMain(m *testing.M) {
+	// A real gh on this machine must not decide these tests.
+	GH = "clifleet-test-no-gh"
+	os.Exit(m.Run())
+}
+
+// fakeGH is a logged-in gh whose attestation verify exits with rc.
+func fakeGH(t *testing.T, rc string) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "gh")
+	body := "#!/bin/sh\ncase $1 in\n  auth) exit 0 ;;\n  attestation) printf '%s\\n' \"$*\" >" + filepath.Join(dir, "args") + "; echo 'verification failed' >&2; exit " + rc + " ;;\nesac\nexit 2\n"
+	if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestUpdateChecksTheBuildAttestationWhenGHIsLoggedIn(t *testing.T) {
+	rel := newRelease(t, "clifleet "+tag)
+	rel.serve(t)
+	defer func(old string) { GH = old }(GH)
+
+	GH = fakeGH(t, "1")
+	path := target(t)
+	if _, err := Update(context.Background(), opts("v0.1.0", path)); err == nil || !strings.Contains(err.Error(), "attestation") {
+		t.Fatal(err)
+	}
+	unchanged(t, path)
+
+	skip := opts("v0.1.0", path)
+	skip.NoAttestation = true
+	if res, err := Update(context.Background(), skip); err != nil || !res.Updated || res.Attested {
+		t.Fatalf("%+v %v", res, err)
+	}
+
+	GH = fakeGH(t, "0")
+	path = target(t)
+	res, err := Update(context.Background(), opts("v0.1.0", path))
+	if err != nil || !res.Updated || !res.Attested {
+		t.Fatalf("%+v %v", res, err)
+	}
+	args, _ := os.ReadFile(filepath.Join(filepath.Dir(GH), "args"))
+	if !strings.Contains(string(args), "--signer-workflow "+signerWorkflow) || !strings.Contains(string(args), "--repo "+repo) {
+		t.Fatalf("verify args %q", args)
+	}
+}
+
 func TestCompare(t *testing.T) {
 	cases := []struct {
 		a, b string
@@ -257,6 +305,12 @@ cp "$f" "$out"
 
 func runInstall(t *testing.T, rel *release, env ...string) (string, string, error) {
 	t.Helper()
+	return runInstallGH(t, rel, "", env...)
+}
+
+// runInstallGH puts a fake gh next to curl when gh is not empty.
+func runInstallGH(t *testing.T, rel *release, gh string, env ...string) (string, string, error) {
+	t.Helper()
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")
 	fixtures := filepath.Join(root, "fixtures")
@@ -270,6 +324,9 @@ func runInstall(t *testing.T, rel *release, env ...string) (string, string, erro
 		filepath.Join(bin, "curl"):                   []byte(fakeCurl),
 		filepath.Join(fixtures, "SHA256SUMS"):        rel.sums,
 		filepath.Join(fixtures, assetName+".tar.gz"): rel.archive,
+	}
+	if gh != "" {
+		files[filepath.Join(bin, "gh")] = []byte(gh)
 	}
 	for p, b := range files {
 		if err := os.WriteFile(p, b, 0o755); err != nil {
@@ -325,5 +382,23 @@ func TestInstallScriptRefusesABadArchive(t *testing.T) {
 		if len(entries) != 0 {
 			t.Fatalf("%s: left %v\n%s", label, entries, out)
 		}
+	}
+}
+
+func TestInstallScriptChecksTheBuildAttestationWhenGHIsLoggedIn(t *testing.T) {
+	failing := "#!/bin/sh\ncase $1 in auth) exit 0 ;; attestation) exit 1 ;; esac\nexit 2\n"
+	path, out, err := runInstallGH(t, newRelease(t, "clifleet "+tag), failing)
+	if err == nil || !strings.Contains(out, "attestation") {
+		t.Fatalf("installed without a valid attestation: %v\n%s", err, out)
+	}
+	if _, serr := os.Stat(path); serr == nil {
+		t.Fatal("a binary was installed")
+	}
+	if _, out, err := runInstallGH(t, newRelease(t, "clifleet "+tag), failing, "CLIFLEET_NO_ATTESTATION=1"); err != nil || !strings.Contains(out, "checked SHA256SUMS)") {
+		t.Fatalf("opt-out: %v\n%s", err, out)
+	}
+	passing := "#!/bin/sh\ncase $1 in auth) exit 0 ;; attestation) case \"$*\" in *--signer-workflow*) exit 0 ;; esac; exit 1 ;; esac\nexit 2\n"
+	if _, out, err := runInstallGH(t, newRelease(t, "clifleet "+tag), passing); err != nil || !strings.Contains(out, "build attestation") {
+		t.Fatalf("attested: %v\n%s", err, out)
 	}
 }
