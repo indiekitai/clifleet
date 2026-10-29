@@ -29,6 +29,8 @@ missing tool.
 6. **Read the report, not the scrollback.** After a long run, read
    `~/.cache/clifleet/last-report.json` (or `$XDG_CACHE_HOME/clifleet/`). Use
    `--json` for parsing. When piping through `tee`, `set -o pipefail` first.
+   Every `status` and `upgrade` (dry runs too) overwrites that file, so copy
+   it before running anything else; `clifleet history` keeps past real runs.
 7. **Do not work around refusals.** `not installed`, `managed by mise`,
    `blocked (needs Node …)`, and `keychain locked` are deliberate. Do not install
    the tool, edit a mise/asdf shim, bump Node, or unlock a keychain; report the

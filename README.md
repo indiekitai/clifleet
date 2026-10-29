@@ -25,7 +25,7 @@ clifleet update           # replace this binary with the latest release
 
 `update` (alias `self-update`) only touches clifleet's own binary, never the CLIs on your hosts; `upgrade` is the one that upgrades the hosts. A clifleet built from source reports `dev` (or the Go pseudo-version `go install` recorded) and is left alone unless you pass `--force`.
 
-In a terminal, `status` and `upgrade` end with one line such as `clifleet v0.3.0 is available (this is v0.2.1). Run clifleet update.` when a newer release exists. The check runs beside the fleet run, asks GitHub at most once a day (once an hour after a failure, cached in `~/.cache/clifleet/update-check.json`), never prints with `--json` or into a pipe, and `CLIFLEET_NO_UPDATE_CHECK=1` turns it off.
+In a terminal, `status` and `upgrade` (not `--dry-run`) end with one line such as `clifleet v0.3.0 is available (this is v0.2.1). Run clifleet update.` when a newer release exists. The check runs beside the fleet run, asks GitHub at most once a day (once an hour after a failure, cached in `~/.cache/clifleet/update-check.json`), never prints with `--json` or into a pipe, and `CLIFLEET_NO_UPDATE_CHECK=1` turns it off.
 
 With Go:
 

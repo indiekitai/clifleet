@@ -30,7 +30,7 @@ it (CLIFLEET_NO_ATTESTATION=1 skips that). The new binary must run here
 before it replaces the old one. A clifleet built from source (version
 "dev") is left alone unless --force is set.
 
-In a terminal, status and upgrade end with a one-line hint when a newer
+In a terminal, status and upgrade (not --dry-run) end with a one-line hint when a newer
 release exists. That check runs beside the fleet run, at most once a day
 (once an hour after a failure), and CLIFLEET_NO_UPDATE_CHECK=1 turns it off.
 

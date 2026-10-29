@@ -384,7 +384,9 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 	notice := func() string { return "" }
 	var progress func(string)
 	if isTerm(stderr) && !jsonOut {
-		notice = startUpdateNotice(ctx)
+		if !dry {
+			notice = startUpdateNotice(ctx)
+		}
 		var mu sync.Mutex
 		progress = func(line string) {
 			mu.Lock()

@@ -35,7 +35,7 @@ Flags:
 
 Examples:
   clifleet history
-  clifleet history --hosts claw1 --only codex
+  clifleet history --hosts us-server --only codex
   clifleet history --limit 0 --json
 `
 

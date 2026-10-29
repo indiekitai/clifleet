@@ -86,7 +86,7 @@ From `scripts/release-check.sh` (`status --json` + `upgrade --dry-run --json`, a
 
 - **mac-studio, claw1:** five-pack current.
 - **mbp:** claude **2.1.296**, opencode **1.18.20** (brew); agent / cursor-agent version unreadable (`keychain locked`). Dry-run would stage claude, codex, agent, cursor-agent (release), opencode (brew), pi (npm).
-- **omarchy:** codex **0.162.1** and opencode **2.1.3** are native but `no-stage` (not in the vendor release layout), pi **1.3.0** `no-stage`; only `--one-shot` (or the host itself, e.g. `mise upgrade`) would move them. claude / agent / cursor-agent current.
+- **omarchy:** codex **0.162.1** at `~/.local/bin/codex`, classed `native` / `no-stage`, but its `--version` answers from mise (`codex@0.162.1` in `~/.config/mise/config.toml`), so it is still the mise install in the gaps table: fix on the host with `mise upgrade codex`. opencode **2.1.3** (native updater) and pi **1.3.0** are `no-stage` too; only `--one-shot` would move them. claude / agent / cursor-agent current.
 - Next real run, once Fan OKs timing: `clifleet upgrade --fetch --hosts mbp --only claude,opencode,pi --timeout 20m`, report, then `--apply`.
 
 ## Last fleet run (2026-10-29 ~13:31 JST)
