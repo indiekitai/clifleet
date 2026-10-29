@@ -96,32 +96,55 @@ var shimPathDirs = []string{
 const scriptFns = `
 # cf_kill_tree PID stops PID and everything it started. Killing only PID
 # leaves the downloads and package managers a capped function started
-# running as orphans.
-# Descendants are collected before the first signal, because once PID dies
-# its children are re-parented and no longer traceable to it. Only the
-# watchdog subshells call it, so its variables never reach a caller.
+# running as orphans. The tree is read before the first signal, because once
+# PID dies its children are re-parented and no longer traceable to it.
+# Processes are named by PID and start time, so the KILL a second later skips
+# a PID the system handed to someone else meanwhile, yet still reaches a
+# re-parented child that ignored TERM. Only the watchdog subshells call it,
+# so its variables never reach a caller.
 cf_kill_tree() {
-  cf_kt_kids=$(cf_descendants "$1")
-  kill "$1" $cf_kt_kids 2>/dev/null || true
+  cf_kt_ids=$(cf_tree "$1:*")
+  kill "$1" $(cf_ids_pids $cf_kt_ids) 2>/dev/null || true
   sleep 1
-  cf_kt_kids="$cf_kt_kids $(cf_descendants "$1" $cf_kt_kids)"
-  kill -9 "$1" $cf_kt_kids 2>/dev/null || true
+  if [ -n "$cf_kt_ids" ]; then
+    cf_kt_ids=$(cf_tree $cf_kt_ids)
+    if [ -n "$cf_kt_ids" ]; then
+      kill -9 $(cf_ids_pids $cf_kt_ids) 2>/dev/null || true
+    fi
+  elif kill -0 "$1" 2>/dev/null; then
+    # No usable ps: only the direct child can be named.
+    kill -9 "$1" 2>/dev/null || true
+  fi
 }
 
-# cf_descendants PID... prints every process below the given PIDs.
-cf_descendants() {
-  { ps -A -o pid= -o ppid= 2>/dev/null || ps -o pid= -o ppid= 2>/dev/null; } | awk -v roots="$*" '
-    BEGIN { n = split(roots, r, " "); for (i = 1; i <= n; i++) seen[r[i]] = 1 }
-    { parent[$1] = $2 }
+# cf_tree ID... prints PID:START for each live process matching an ID, and
+# for all of their descendants. An ID is PID:START, or PID:* for any start.
+cf_tree() {
+  { ps -A -o pid= -o ppid= -o lstart= 2>/dev/null || ps -A -o pid= -o ppid= 2>/dev/null || ps -o pid= -o ppid= 2>/dev/null; } | awk -v ids="$*" '
+    BEGIN { n = split(ids, a, " "); for (i = 1; i <= n; i++) want[a[i]] = 1 }
+    {
+      st = ""
+      for (i = 3; i <= NF; i++) st = st "_" $i
+      parent[$1] = $2
+      start[$1] = st
+    }
     END {
+      for (p in parent) if (((p ":" start[p]) in want) || ((p ":*") in want)) seen[p] = 1
       changed = 1
       while (changed) {
         changed = 0
         for (p in parent) {
-          if (!(p in seen) && (parent[p] in seen)) { seen[p] = 1; changed = 1; print p }
+          if (!(p in seen) && (parent[p] in seen)) { seen[p] = 1; changed = 1 }
         }
       }
+      for (p in seen) print p ":" start[p]
     }'
+}
+
+cf_ids_pids() {
+  for cf_ip in "$@"; do
+    printf '%s\n' "${cf_ip%%:*}"
+  done
 }
 
 # cf_cap SECONDS OUTFILE CMD... runs CMD with stdin /dev/null and kills it
@@ -146,11 +169,14 @@ cf_cap() {
   kpid=$!
   status=0
   wait "$pid" 2>/dev/null || status=$?
-  kill "$kpid" 2>/dev/null || true
-  wait "$kpid" 2>/dev/null || true
   if [ -f "$flag" ]; then
+    # The cap fired: let the watchdog finish, so a child that ignored TERM
+    # still gets its KILL.
+    wait "$kpid" 2>/dev/null || true
     return 124
   fi
+  kill "$kpid" 2>/dev/null || true
+  wait "$kpid" 2>/dev/null || true
   return "$status"
 }
 
@@ -174,11 +200,14 @@ cf_limit() {
   kpid=$!
   status=0
   wait "$pid" 2>/dev/null || status=$?
-  kill "$kpid" 2>/dev/null || true
-  wait "$kpid" 2>/dev/null || true
   if [ -f "$flag" ]; then
+    # The cap fired: let the watchdog finish, so a child that ignored TERM
+    # still gets its KILL.
+    wait "$kpid" 2>/dev/null || true
     return 124
   fi
+  kill "$kpid" 2>/dev/null || true
+  wait "$kpid" 2>/dev/null || true
   return "$status"
 }
 
@@ -205,11 +234,14 @@ cf_cap_both() {
   kpid=$!
   status=0
   wait "$pid" 2>/dev/null || status=$?
-  kill "$kpid" 2>/dev/null || true
-  wait "$kpid" 2>/dev/null || true
   if [ -f "$flag" ]; then
+    # The cap fired: let the watchdog finish, so a child that ignored TERM
+    # still gets its KILL.
+    wait "$kpid" 2>/dev/null || true
     return 124
   fi
+  kill "$kpid" 2>/dev/null || true
+  wait "$kpid" 2>/dev/null || true
   return "$status"
 }
 

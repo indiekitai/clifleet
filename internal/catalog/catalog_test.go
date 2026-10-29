@@ -535,3 +535,73 @@ func withPkg(o Observation, pkg string) Observation {
 	o.Package = pkg
 	return o
 }
+
+// Volta shims, and tools inside a manager's installs/ dir, upgrade through
+// that manager. Swapping them would fight it, and the npm a remote script
+// finds may belong to another node.
+func TestVoltaAndManagerInstallsAreManaged(t *testing.T) {
+	cases := map[string]Observation{
+		"volta": present("claude", "/home/a/.volta/bin/claude", "/home/a/.volta/bin/volta-shim", "2.0.0"),
+		// A PATH entry straight into Volta's package image, past the shim.
+		"volta image": present("claude", "/home/a/.volta/tools/image/packages/@anthropic-ai/claude-code/bin/claude", "/home/a/.volta/tools/image/packages/@anthropic-ai/claude-code/lib/node_modules/@anthropic-ai/claude-code/cli.js", "2.0.0"),
+		"mise":        present("codex", "/home/a/.local/share/mise/installs/node/22.1.0/bin/codex", "/home/a/.local/share/mise/installs/node/22.1.0/lib/node_modules/@openai/codex/bin/codex.js", "0.1.0"),
+		"asdf":        present("codex", "/home/a/.asdf/installs/nodejs/22.1.0/bin/codex", "/home/a/.asdf/installs/nodejs/22.1.0/lib/node_modules/@openai/codex/bin/codex.js", "0.1.0"),
+	}
+	for label, obs := range cases {
+		want := strings.Fields(label)[0]
+		if name, ok := ManagedBy(obs); !ok || name != want {
+			t.Fatalf("%s: ManagedBy %q %v", want, name, ok)
+		}
+		if plan := PlanStage(Resolve(obs.Tool, nil), obs, ""); plan.Action != ActionSkip || plan.Reason != "managed by "+want {
+			t.Fatalf("%s: plan %+v", want, plan)
+		}
+		if dec := Decide(Resolve(obs.Tool, nil), obs, ""); dec.Command != nil || dec.Skip != "managed by "+want {
+			t.Fatalf("%s: decision %+v", want, dec)
+		}
+	}
+}
+
+func TestNpmPackageMatchesWholeSegments(t *testing.T) {
+	sdk := present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex-sdk/bin/codex.js", "0.1.0")
+	sdk.Package = "@openai/codex-sdk"
+	if got := npmPackage(Resolve("codex", nil), sdk); got != "@openai/codex-sdk" {
+		t.Fatalf("codex-sdk read as %q", got)
+	}
+	// The binary sits in a platform package nested in the main one: the main
+	// package on the path wins over the name on disk.
+	nested := present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/codex", "0.1.0")
+	nested.Package = "@openai/codex-darwin-arm64"
+	if got := npmPackage(Resolve("codex", nil), nested); got != "@openai/codex" {
+		t.Fatalf("nested platform package %q", got)
+	}
+	// Hoisted beside it, the platform package still maps back to the tool's own.
+	hoisted := present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex-linux-x64/vendor/codex", "0.1.0")
+	hoisted.Package = "@openai/codex-linux-x64"
+	if got := npmPackage(Resolve("codex", nil), hoisted); got != "@openai/codex" {
+		t.Fatalf("hoisted platform package %q", got)
+	}
+	plan := PlanStage(Resolve("codex", nil), hoisted, "")
+	if plan.Action != ActionStage || plan.Fetch == nil || !strings.Contains(plan.Fetch.Display, "@openai/codex@latest") || strings.Contains(plan.Fetch.Display, "linux-x64") {
+		t.Fatalf("plan %+v", plan)
+	}
+}
+
+// A user recipe's native command is what the owner asked for; a staged
+// release would skip it.
+func TestCustomNativeRecipeIsNotStaged(t *testing.T) {
+	obs := present("claude", "/home/a/.local/bin/claude", "/home/a/.local/share/claude/versions/2.1.40", "2.1.40")
+	if plan := PlanStage(Resolve("claude", nil), obs, ""); plan.Action != ActionStage {
+		t.Fatalf("built-in claude should stage: %+v", plan)
+	}
+	spec := Resolve("claude", []Overlay{{Name: "claude", Native: []string{"claude", "update", "--channel", "stable"}}})
+	plan := PlanStage(spec, obs, "")
+	if plan.Action != ActionNoStage || plan.Reason != ReasonNoStageCustom {
+		t.Fatalf("custom native was staged: %+v", plan)
+	}
+	if dec := Decide(spec, obs, ""); dec.Command == nil || dec.Command.Display != "claude update --channel stable" {
+		t.Fatalf("one-shot lost the recipe: %+v", dec)
+	}
+	if spec := Resolve("claude", []Overlay{{Name: "claude", Npm: "@anthropic-ai/claude-code"}}); spec.CustomNative {
+		t.Fatal("an overlay without native marked the spec custom")
+	}
+}

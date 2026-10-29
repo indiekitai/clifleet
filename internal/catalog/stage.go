@@ -23,6 +23,7 @@ const (
 	// has no documented artifact URL. The one-shot path is explicit.
 	ReasonNoStageNative = "native updater has no staged artifact; use clifleet upgrade --one-shot"
 	ReasonNoStageBun    = "bun global installs are not staged; use clifleet upgrade --one-shot"
+	ReasonNoStageCustom = "custom native recipe is not staged; use clifleet upgrade --one-shot"
 	ReasonNoStagePnpm   = "pnpm global installs are not staged; use clifleet upgrade --one-shot"
 	ReasonNoStageYarn   = "yarn global installs are not staged; use clifleet upgrade --one-shot"
 )
@@ -87,6 +88,9 @@ func PlanStage(spec Spec, obs Observation, methodOverride string) StagePlan {
 	case MethodYarn:
 		return StagePlan{Method: MethodYarn, Action: ActionNoStage, Reason: ReasonNoStageYarn}
 	case MethodNative:
+		if spec.CustomNative {
+			return StagePlan{Method: MethodNative, Action: ActionNoStage, Reason: ReasonNoStageCustom}
+		}
 		if id, ok := nativeRelease(spec.Name, obs.Real); ok {
 			return releaseStage(id)
 		}

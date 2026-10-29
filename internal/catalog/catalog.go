@@ -28,6 +28,9 @@ type Spec struct {
 	Npm      string
 	Brew     string
 	BrewKind string // "cask" or "formula"
+	// CustomNative is set when a user recipe supplied Native. A staged
+	// release would bypass that command, so such a tool is not staged.
+	CustomNative bool
 }
 
 // Overlay is a user recipe. Empty fields do not erase a built-in spec.
@@ -318,6 +321,7 @@ func Resolve(name string, overlays []Overlay) Spec {
 		}
 		if len(o.Native) > 0 {
 			spec.Native = append([]string(nil), o.Native...)
+			spec.CustomNative = true
 		}
 		if o.Npm != "" {
 			spec.Npm = o.Npm
@@ -401,11 +405,18 @@ func managerName(p string) string {
 	if p == "" {
 		return ""
 	}
+	// installs/ too: a tool under a manager's own node or package dir is
+	// upgraded through that manager, and the npm a remote script finds may
+	// belong to another node version.
 	switch {
-	case strings.Contains(p, "/mise/shims/"), strings.Contains(p, "/.mise/shims/"):
+	case strings.Contains(p, "/mise/shims/"), strings.Contains(p, "/.mise/shims/"),
+		strings.Contains(p, "/mise/installs/"), strings.Contains(p, "/.mise/installs/"):
 		return "mise"
-	case strings.Contains(p, "/asdf/shims/"), strings.Contains(p, "/.asdf/shims/"):
+	case strings.Contains(p, "/asdf/shims/"), strings.Contains(p, "/.asdf/shims/"),
+		strings.Contains(p, "/asdf/installs/"), strings.Contains(p, "/.asdf/installs/"):
 		return "asdf"
+	case strings.Contains(p, "/.volta/bin/"), strings.Contains(p, "/.volta/tools/image/"):
+		return "volta"
 	}
 	base := p
 	if i := strings.LastIndex(p, "/"); i >= 0 {
@@ -416,6 +427,8 @@ func managerName(p string) string {
 		return "mise"
 	case "asdf":
 		return "asdf"
+	case "volta", "volta-shim":
+		return "volta"
 	default:
 		return ""
 	}
@@ -544,16 +557,7 @@ func brewCommand(spec Spec, obs Observation) (*Command, error) {
 }
 
 func npmLike(bin string, prefix []string, spec Spec, obs Observation) (*Command, error) {
-	pkg := obs.Package
-	if pkg == "" {
-		pkg = inferPackage(obs.Real)
-	}
-	if pkg == "" {
-		pkg = inferPackage(obs.Path)
-	}
-	if pkg == "" {
-		pkg = spec.Npm
-	}
+	pkg := npmPackage(spec, obs)
 	if pkg == "" {
 		// OpenCode's own upgrader detects npm, pnpm, and bun. Prefer that
 		// over guessing opencode-ai versus @opencode/cli.
@@ -575,6 +579,29 @@ func npmLike(bin string, prefix []string, spec Spec, obs Observation) (*Command,
 	return &Command{Argv: argv, Method: bin, Display: shellquote.Display(argv), Package: pkg}, nil
 }
 
+// npmPackage picks the package an npm-style upgrade installs. A known package
+// found in the resolved path comes first, then the name read from disk. A
+// platform subpackage on disk (@openai/codex-darwin-arm64) maps back to the
+// tool's package; installing it at the top level would add a package, not
+// upgrade one.
+func npmPackage(spec Spec, obs Observation) string {
+	if pkg := inferPackage(obs.Real); pkg != "" {
+		return pkg
+	}
+	if pkg := inferPackage(obs.Path); pkg != "" {
+		return pkg
+	}
+	if obs.Package != "" {
+		if rest, ok := strings.CutPrefix(obs.Package, spec.Npm+"-"); ok && spec.Npm != "" && platformSuffixRe.MatchString(rest) {
+			return spec.Npm
+		}
+		return obs.Package
+	}
+	return spec.Npm
+}
+
+var platformSuffixRe = regexp.MustCompile(`^(darwin|linux|win32|freebsd)-[a-z0-9]+(-[a-z0-9]+)?$`)
+
 func inferPackage(path string) string {
 	known := []string{
 		"@anthropic-ai/claude-code",
@@ -592,12 +619,16 @@ func inferPackage(path string) string {
 		"@xai-official/grok",
 		"@kilocode/cli",
 	}
+	// Match a whole node_modules segment, so @openai/codex-sdk is not read
+	// as @openai/codex. The outermost package wins: a binary nested inside
+	// a known package's own node_modules still belongs to that package.
+	best, at := "", -1
 	for _, pkg := range known {
-		if strings.Contains(path, pkg) {
-			return pkg
+		if i := strings.Index(path, "/node_modules/"+pkg+"/"); i >= 0 && (at < 0 || i < at) {
+			best, at = pkg, i
 		}
 	}
-	return ""
+	return best
 }
 
 var (

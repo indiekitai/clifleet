@@ -365,25 +365,28 @@ cf_atomic_link() {
   mv -f "$tmp" "$link" || { rm -f "$tmp"; return 1; }
 }
 
-# cf_version_manager prints mise or asdf when the live command is a shim
+# cf_version_manager prints mise, asdf, or volta when the live command is a shim
 # that resolves into the version manager. Empty means a normal binary.
 # clifleet does not run mise/asdf to change a global tool version.
 cf_version_manager() {
   path=$1
   case $path in
     '' ) return 0 ;;
-    */mise/shims/*|*/.mise/shims/*) printf 'mise\n'; return 0 ;;
-    */asdf/shims/*|*/.asdf/shims/*) printf 'asdf\n'; return 0 ;;
+    */mise/shims/*|*/.mise/shims/*|*/mise/installs/*|*/.mise/installs/*) printf 'mise\n'; return 0 ;;
+    */asdf/shims/*|*/.asdf/shims/*|*/asdf/installs/*|*/.asdf/installs/*) printf 'asdf\n'; return 0 ;;
+    */.volta/bin/*|*/.volta/tools/image/*) printf 'volta\n'; return 0 ;;
   esac
   real=$(resolve "$path")
   base=$(basename "$real")
   case $base in
     mise) printf 'mise\n'; return 0 ;;
     asdf) printf 'asdf\n'; return 0 ;;
+    volta|volta-shim) printf 'volta\n'; return 0 ;;
   esac
   case $real in
-    */mise/shims/*|*/.mise/shims/*) printf 'mise\n'; return 0 ;;
-    */asdf/shims/*|*/.asdf/shims/*) printf 'asdf\n'; return 0 ;;
+    */mise/shims/*|*/.mise/shims/*|*/mise/installs/*|*/.mise/installs/*) printf 'mise\n'; return 0 ;;
+    */asdf/shims/*|*/.asdf/shims/*|*/asdf/installs/*|*/.asdf/installs/*) printf 'asdf\n'; return 0 ;;
+    */.volta/bin/*|*/.volta/tools/image/*) printf 'volta\n'; return 0 ;;
   esac
 }
 
@@ -728,7 +731,8 @@ cf_link_npm_bins() {
   cf_lb_pkgdir=$1
   cf_lb_bindir=$2
   cf_lb_undo=$cf_dir/bins.undo
-  : >"$cf_lb_undo"
+  # Without an undo record a rollback could not put the links back.
+  : >"$cf_lb_undo" || return 1
   cf_lb_json=$cf_lb_pkgdir/package.json
   [ -f "$cf_lb_json" ] || return 0
   if ! command -v node >/dev/null 2>&1; then
@@ -763,11 +767,13 @@ cf_link_npm_bins() {
     cf_lb_tmp=$cf_lb_bindir/.$cf_lb_name.clifleet-new
     rm -f "$cf_lb_tmp"
     ln -s "$cf_lb_target" "$cf_lb_tmp" || continue
-    if mv -f "$cf_lb_tmp" "$cf_lb_live"; then
-      printf '%s\t%s\n' "$cf_lb_name" "$cf_lb_old" >>"$cf_lb_undo"
-    else
+    # Record first: a link swapped without its undo line could not be put
+    # back. Undoing a swap that then failed rewrites the same old target.
+    if ! printf '%s\t%s\n' "$cf_lb_name" "$cf_lb_old" >>"$cf_lb_undo"; then
       rm -f "$cf_lb_tmp"
+      continue
     fi
+    mv -f "$cf_lb_tmp" "$cf_lb_live" || rm -f "$cf_lb_tmp"
   done < "$cf_lb_list"
 }
 

@@ -2231,3 +2231,42 @@ cat "$(dirname "$CF_JSON")/bins.txt"
 		t.Fatalf("codex after rollback %v %q", err, still)
 	}
 }
+
+// A Volta shim is Volta's; apply must not relink it to a release.
+func TestClaudeApplyRefusesVoltaShim(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	voltaBin := filepath.Join(home, ".volta", "bin")
+	cache := filepath.Join(home, ".cache", "clifleet")
+	if err := os.MkdirAll(voltaBin, 0o755); err != nil || os.MkdirAll(filepath.Join(cache, "staged"), 0o755) != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(voltaBin, "volta-shim")
+	const shimBody = "#!/bin/sh\nprintf '2.0.0\\n'\n"
+	if err := os.WriteFile(shim, []byte(shimBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(shim, filepath.Join(voltaBin, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	staged := filepath.Join(cache, "claude-2.1.40")
+	writeExe(t, staged, "#!/bin/sh\nprintf '2.1.40 (Claude Code)\\n'\n")
+	if err := os.WriteFile(filepath.Join(cache, "staged", "claude"), []byte("release\tclaude\t2.1.40\t"+staged+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	apply, err := ApplyScript([]Tool{{Name: "claude", Binary: "claude"}}, []string{voltaBin}, []StageStep{{Tool: "claude", Kind: catalog.KindRelease, Release: "claude"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := runSh(t, apply, []string{"PATH=" + voltaBin + ":/usr/bin:/bin", "HOME=" + home})
+	results, _, err := ParseApply(out)
+	if err != nil || len(results) != 1 || !strings.Contains(results[0].Blocked, "managed by volta") {
+		t.Fatalf("%v %+v\n%s", err, results, out)
+	}
+	if link, _ := os.Readlink(filepath.Join(voltaBin, "claude")); link != shim {
+		t.Fatalf("volta shim relinked to %q", link)
+	}
+	if body, _ := os.ReadFile(shim); string(body) != shimBody {
+		t.Fatalf("volta-shim changed: %q", body)
+	}
+}

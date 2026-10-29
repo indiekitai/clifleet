@@ -456,9 +456,38 @@ if kill -0 "$kid" 2>/dev/null; then
 else
   echo gone
 fi
+# A child that ignores TERM outlives its parent; the KILL must still reach it.
+stubborn() {
+  ( trap '' TERM; exec sleep 317 ) &
+  printf '%s\n' "$!" >"$cf_dir/kid"
+  wait
+}
+cf_limit 1 stubborn
+printf 'rc=%s\n' "$?"
+kid=$(cat "$cf_dir/kid")
+sleep 1
+if kill -0 "$kid" 2>/dev/null; then
+  kill -9 "$kid"
+  echo orphan
+else
+  echo gone
+fi
+# A PID is matched with its start time, so a reused PID is not.
+sleep 317 &
+other=$!
+case $(cf_tree "$other:_not_its_start") in
+  '') echo identity-ok ;;
+  *) echo identity-ignored ;;
+esac
+case $(cf_tree "$other:*") in
+  "$other:"*) echo tree-ok ;;
+  *) echo tree-missed ;;
+esac
+kill -9 "$other"
 `
 	out := runSh(t, body, []string{"PATH=/usr/bin:/bin", "HOME=" + root})
-	if strings.Count(out, "rc=124") != 2 || strings.Contains(out, "orphan") || strings.Count(out, "gone") != 2 {
+	if strings.Count(out, "rc=124") != 3 || strings.Contains(out, "orphan") || strings.Count(out, "gone") != 3 ||
+		!strings.Contains(out, "identity-ok") || !strings.Contains(out, "tree-ok") {
 		t.Fatalf("cap left a child running:\n%s", out)
 	}
 }
