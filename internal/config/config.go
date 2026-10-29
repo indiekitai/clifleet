@@ -165,6 +165,9 @@ func normalize(path string, raw File) (Loaded, error) {
 	}
 
 	seen := map[string]struct{}{}
+	// Two entries for the same machine would run their scripts at the same
+	// time, and an apply has no remote lock.
+	machines := map[string]string{}
 	var errs []error
 	hosts := make([]Host, len(raw.Hosts))
 	for i, h := range raw.Hosts {
@@ -221,8 +224,15 @@ func normalize(path string, raw File) (Loaded, error) {
 				errs = append(errs, fmt.Errorf("host %s: path_extra %q must be an absolute path without spaces or ..", h.Name, p))
 			}
 		}
-		if _, _, err := Destination(h); err != nil {
+		if dest, port, err := Destination(h); err != nil {
 			errs = append(errs, err)
+		} else {
+			machine := fmt.Sprintf("%s:%d", dest, port)
+			if other, ok := machines[machine]; ok {
+				errs = append(errs, fmt.Errorf("hosts %s and %s are the same machine (%s)", other, h.Name, dest))
+			} else {
+				machines[machine] = h.Name
+			}
 		}
 		hosts[i] = h
 	}
@@ -265,6 +275,15 @@ func Destination(h Host) (dest string, port int, err error) {
 	if h.Local {
 		return "local", 0, nil
 	}
+	dest, port, err = destination(h)
+	if err == nil && strings.HasPrefix(dest, "-") {
+		// ssh would read it as an option (-oProxyCommand=… runs a command).
+		return "", 0, fmt.Errorf("host %s: ssh destination %q must not start with -", h.Name, dest)
+	}
+	return dest, port, err
+}
+
+func destination(h Host) (dest string, port int, err error) {
 	port = h.Port
 	if s := strings.TrimSpace(h.SSH); s != "" {
 		d, p, err := ParseSSH(s)
@@ -375,7 +394,8 @@ func ExpandHome(path string) (string, error) {
 }
 
 // FilterHosts keeps hosts named by --hosts. Names match case-insensitively.
-// An ssh alias matches exactly. The result preserves the requested order.
+// An ssh alias matches exactly. The result preserves the requested order and
+// lists each host once, however many times it was named.
 func FilterHosts(hosts []Host, want []string) ([]Host, error) {
 	if len(want) == 0 {
 		return hosts, nil
@@ -399,7 +419,15 @@ func FilterHosts(hosts []Host, want []string) ([]Host, error) {
 			missing = append(missing, w)
 			continue
 		}
-		out = append(out, *found)
+		dup := false
+		for _, o := range out {
+			if o.Name == found.Name {
+				dup = true
+			}
+		}
+		if !dup {
+			out = append(out, *found)
+		}
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("unknown host %s", strings.Join(missing, ", "))

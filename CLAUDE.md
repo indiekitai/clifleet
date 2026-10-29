@@ -62,3 +62,5 @@ Data flow: `cmd/clifleet` → `cli` (flags, subcommands, table/JSON output, `las
 ## Operating on the real fleet
 
 `docs/HANDOFF.md` has the owner's hosts and preferences. In short: don't run a real `upgrade` / `--fetch` / `--apply` against the fleet without the owner confirming timing (`status`, `doctor`, and `--dry-run` are safe); prefer `--fetch` then `--apply` over `--one-shot`; never allowlist `dsh` on US hosts (`claw1`); after long runs read `~/.cache/clifleet/last-report.json`, and use `set -o pipefail` when piping through `tee`. Update `docs/HANDOFF.md` when `main` tip or fleet state changes.
+
+This is the owner's own repo: commit (Chinese message) and push straight to `main`; no PRs.

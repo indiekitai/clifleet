@@ -18,11 +18,11 @@ func TestSSHArgsBatchMode(t *testing.T) {
 	if strings.Contains(got, "StrictHostKeyChecking=no") {
 		t.Fatal("host key checking was disabled")
 	}
-	if args[len(args)-3] != "claw1" || args[len(args)-2] != "sh" || args[len(args)-1] != "-s" {
-		t.Fatalf("tail %v", args[len(args)-3:])
+	if args[len(args)-4] != "--" || args[len(args)-3] != "claw1" || args[len(args)-2] != "sh" || args[len(args)-1] != "-s" {
+		t.Fatalf("tail %v", args[len(args)-4:])
 	}
 	dial := DialArgs(Target{Destination: "claw1"})
-	if dial[len(dial)-1] != "claw1" {
+	if dial[len(dial)-2] != "--" || dial[len(dial)-1] != "claw1" {
 		t.Fatalf("dial %v", dial)
 	}
 }

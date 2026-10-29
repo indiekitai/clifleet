@@ -447,14 +447,24 @@ func writeLimited(b *strings.Builder, fetch bool, kind, tool, call string, toolT
 // limitSeconds is the per-tool script cap. A zero toolTimeout uses the
 // defaults (npm 120s, brew fetch 180s, release fetch 480s, apply 180s).
 // When the host budget is longer, release and brew fetches may use it,
-// minus 20s so the script can print a CF1 line before SSH kills it.
+// minus 20s so the script can print a CF1 line before SSH kills it. A short
+// budget keeps a third of itself as that margin; the cap never reaches the
+// budget, or SSH would kill the script before it reports the timeout.
 func limitSeconds(fetch bool, kind string, toolTimeout time.Duration) int {
 	npm, brew, release, apply := 120, 180, 480, 180
 	avail := 0
 	if toolTimeout > 0 {
-		avail = int(toolTimeout.Seconds()) - 20
-		if avail < 45 {
-			avail = 45
+		total := int(toolTimeout.Seconds())
+		margin := 20
+		if total < 60 {
+			margin = total / 3
+			if margin < 1 {
+				margin = 1
+			}
+		}
+		avail = total - margin
+		if avail < 1 {
+			avail = 1
 		}
 	}
 	if !fetch {

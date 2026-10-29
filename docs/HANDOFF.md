@@ -25,7 +25,8 @@ Operational state for whoever maintains the **public product** and Fan's **perso
 
 Checked against `origin/main` on 2026-10-29 (Asia/Tokyo). Tip SHA, PR #2–#4 subjects, the `v0.1.0` tag, Go 1.22, topics, and the release ldflags line match this file. No open PRs. The only correction from the earlier draft: ldflags are already wired for **tag** builds, not still missing.
 
-- `main` @ `1cad8412` — squash-merge of **PR #4** (*Harden staged apply against mise shims, keychain rollbacks, and summary counts*)
+- Since 2026-10-29 evening `main` moves by **direct push** (no PRs; owner's call). `08233f6` fixed five staged-apply must-fix issues (vendor-layout gate, rollback reporting, Codex/Cursor link handling); the next push adds ssh `--` / dash-destination rejection, duplicate-host rejection, a doctor deadline, short-budget caps, and partial-output salvage for apply / one-shot. Read the tip with `git log origin/main -1`.
+- `1cad8412` — squash-merge of **PR #4** (*Harden staged apply against mise shims, keychain rollbacks, and summary counts*)
 - Prior merges worth knowing:
   - **PR #3** `b35f40c8` — staged upgrade is the default path (npm atomic temp-prefix apply, brew PATH / `shellenv`, native stage budget, engines preflight)
   - **PR #2** `77bbf8b1` — `--fetch` / `--apply`, SSH `-T`, nvm/`--version` caps, status default 45s
@@ -46,7 +47,7 @@ go install github.com/indiekitai/clifleet/cmd/clifleet@1cad8412
 # or @latest after the next tag
 ```
 
-A checked-out copy under `/Users/tf/Documents/Fansen` was **not** present at handoff; work from GitHub / `go install`, not a missing local clone.
+The binary above is older than `main`; reinstall with `go install github.com/indiekitai/clifleet/cmd/clifleet@main` before the next real run. A working clone now lives at `/Users/tf/Documents/Fansen/clifleet`.
 
 ## Fleet (`hosts.toml`)
 

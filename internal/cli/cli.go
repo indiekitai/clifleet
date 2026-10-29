@@ -453,11 +453,26 @@ func writeLastReport(report fleet.Report) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(raw, '\n'), 0o644); err != nil {
+	// A temp name of its own, so two runs finishing together cannot rename
+	// each other's half-written file into place.
+	tmp, err := os.CreateTemp(filepath.Dir(path), "last-report-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	_, werr := tmp.Write(append(raw, '\n'))
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmp.Name(), 0o644)
+	}
+	if werr == nil {
+		werr = os.Rename(tmp.Name(), path)
+	}
+	if werr != nil {
+		os.Remove(tmp.Name())
+	}
+	return werr
 }
 
 func lastReportPath() (string, error) {
@@ -560,11 +575,19 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 		t := runner.Target{Name: h.Name, Destination: dest, Port: port, Identity: h.Identity, Timeout: timeout}
 		start := time.Now()
-		cmd := exec.CommandContext(ctx, "ssh", append(runner.DialArgs(t), "true")...)
+		// ConnectTimeout only covers the TCP connect. A host that hangs after
+		// that (auth, a stuck shell) must not stall doctor.
+		hctx, cancel := context.WithTimeout(ctx, timeout+doctorGrace)
+		cmd := exec.CommandContext(hctx, "ssh", append(runner.DialArgs(t), "true")...)
+		cmd.WaitDelay = time.Second
 		out, err := cmd.CombinedOutput()
+		timedOut := hctx.Err() == context.DeadlineExceeded
+		cancel()
 		if err != nil {
 			msg := firstLine(string(out))
-			if msg == "" {
+			if timedOut {
+				msg = fmt.Sprintf("timed out after %s", (timeout + doctorGrace).Round(time.Second))
+			} else if msg == "" {
 				msg = err.Error()
 			}
 			rows = append(rows, check{h.Name, "fail", msg})
@@ -585,8 +608,15 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// doctorGrace is how long doctor waits past the connect timeout for ssh to
+// log in and run `true`.
+var doctorGrace = 5 * time.Second
+
 func sshVersion() string {
-	cmd := exec.Command("ssh", "-V")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ssh", "-V")
+	cmd.WaitDelay = time.Second
 	out, _ := cmd.CombinedOutput()
 	line := firstLine(string(out))
 	if i := strings.Index(line, ","); i > 0 {

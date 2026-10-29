@@ -403,9 +403,20 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 		upOut, upErr, err := run.Run(ctx, target, upScript)
 		if err != nil {
 			progress(opt, "✗ %s  %s", host.Name, err.Error())
+			// Keep the rows of tools whose updater finished before the host error;
+			// only the ones that never reported carry the error.
 			failed := hostError(host, err.Error())
+			partial, _, _ := probe.ParseUpgrade(upOut)
+			done := map[string]int{}
+			for _, res := range partial {
+				done[res.Tool] = res.Exit
+			}
 			for i, name := range names {
-				failed.Rows = append(failed.Rows, failedRow(name, plans[i], err.Error()))
+				if _, ok := done[name]; !ok && plans[i].dec.Command != nil {
+					failed.Rows = append(failed.Rows, failedRow(name, plans[i], err.Error()))
+					continue
+				}
+				failed.Rows = append(failed.Rows, renderRow(name, plans[i], upgrade, false, done, nil))
 			}
 			return failed
 		}

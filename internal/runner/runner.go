@@ -89,7 +89,8 @@ func (Exec) Run(ctx context.Context, target Target, script string) (string, stri
 }
 
 // DialArgs is the OpenSSH argv up to and including the destination.
-// It does not include a remote command.
+// It does not include a remote command. "--" ends the options, so a
+// destination that starts with "-" cannot be read as one (-oProxyCommand=…).
 func DialArgs(target Target) []string {
 	connect := 15 * time.Second
 	if target.Timeout > 0 && target.Timeout < connect {
@@ -115,7 +116,7 @@ func DialArgs(target Target) []string {
 	if target.Identity != "" {
 		args = append(args, "-i", target.Identity, "-o", "IdentitiesOnly=yes")
 	}
-	return append(args, target.Destination)
+	return append(args, "--", target.Destination)
 }
 
 // SSHArgs is the OpenSSH argv for a script on stdin (`sh -s`).

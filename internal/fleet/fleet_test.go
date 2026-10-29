@@ -740,3 +740,87 @@ func TestStatusBudgetAndUnreachableDetail(t *testing.T) {
 		t.Fatal("example timeout should be explicit")
 	}
 }
+
+type scriptRunner func(script string) (string, string, error)
+
+func (f scriptRunner) Run(_ context.Context, _ runner.Target, script string) (string, string, error) {
+	return f(script)
+}
+
+func TestApplyTimeoutKeepsPartialSuccess(t *testing.T) {
+	cfg := parseFleet(t, `
+[[hosts]]
+name = "box"
+ssh = "box"
+tools = ["codex", "opencode"]
+`)
+	probe := probeOut(
+		withPkg(present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "0.1.0"), "@openai/codex"),
+		withBrew(present("opencode", "/opt/homebrew/bin/opencode", "/opt/homebrew/Cellar/opencode/1.0.0/bin/opencode", "1.0.0"), "formula", "opencode"),
+	)
+	fake := scriptRunner(func(script string) (string, string, error) {
+		switch {
+		case strings.Contains(script, "apply_npm 'codex'"):
+			// The swap finished and was reported; the re-probe after it timed out.
+			return "clifleet-apply/1\n" + actionLine("apply", "codex", "0", "swapped") + "\n", "", errString("timed out after 10m0s")
+		case strings.Contains(script, "apply_brew 'opencode'"):
+			return "", "", errString("timed out after 10m0s")
+		}
+		return probe, "", nil
+	})
+	got, err := Upgrade(context.Background(), cfg, Options{Phase: PhaseApply}, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saw := map[string]Row{}
+	for _, h := range got.Hosts {
+		for _, row := range h.Rows {
+			saw[row.Tool] = row
+		}
+	}
+	if saw["codex"].Status != StApplied || saw["codex"].Failed {
+		t.Fatalf("an apply that already reported success is not failed: %+v", saw["codex"])
+	}
+	if saw["opencode"].Status != StFailed || !strings.Contains(saw["opencode"].Detail, "timed out") {
+		t.Fatalf("opencode %+v", saw["opencode"])
+	}
+	if !got.Failed() {
+		t.Fatal("the timed-out apply should still fail the run")
+	}
+}
+
+func TestOneShotHostErrorKeepsFinishedRows(t *testing.T) {
+	cfg := parseFleet(t, `
+[[hosts]]
+name = "box"
+ssh = "box"
+tools = ["claude", "codex"]
+`)
+	probe := probeOut(
+		present("claude", "/home/a/.local/bin/claude", "/home/a/.local/bin/claude", "2.1.40"),
+		withPkg(present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "0.1.0"), "@openai/codex"),
+	)
+	fake := scriptRunner(func(script string) (string, string, error) {
+		if strings.Contains(script, "clifleet-upgrade/1") {
+			return "clifleet-upgrade/1\n" + strings.Join([]string{"CF1", "upgrade", "claude", "0"}, "\t") + "\n", "", errString("timed out after 10m0s")
+		}
+		return probe, "", nil
+	})
+	got, err := Upgrade(context.Background(), cfg, Options{OneShot: true}, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Failed() || got.Hosts[0].Error == "" {
+		t.Fatalf("the host error must still fail the run: %s", got.Summary())
+	}
+	saw := map[string]Row{}
+	for _, row := range got.Hosts[0].Rows {
+		saw[row.Tool] = row
+	}
+	if saw["claude"].Status != StUpgraded || saw["claude"].Failed {
+		t.Fatalf("claude finished before the timeout: %+v", saw["claude"])
+	}
+	if saw["codex"].Status != StFailed || !strings.Contains(saw["codex"].Detail, "timed out") {
+		t.Fatalf("codex %+v", saw["codex"])
+	}
+}

@@ -91,19 +91,10 @@ func runStageSteps(ctx context.Context, target runner.Target, run runner.Runner,
 		}
 		if err != nil {
 			// A host timeout still returns whatever CF1 lines were printed.
-			// A tool that already reported success is not failed with its siblings.
-			if phase == PhaseFetch {
-				if got, perr := probe.ParseFetch(out); perr == nil {
-					for _, res := range got {
-						if res.Tool == step.Tool {
-							actions[step.Tool] = res
-							break
-						}
-					}
-					if _, ok := actions[step.Tool]; ok {
-						continue
-					}
-				}
+			// A tool that already reported its result is not failed with its siblings.
+			if res, ok := partialAction(phase, out, step.Tool); ok {
+				actions[step.Tool] = res
+				continue
 			}
 			actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: err.Error()}
 			continue
@@ -204,11 +195,21 @@ func parseStage(phase, out string) (map[string]probe.ActionResult, map[string]ca
 	return actions, after, nil
 }
 
-func hostErrorResult(base HostResult, msg string) HostResult {
-	base.Error = msg
-	base.Rows = nil
-	base.Log = ""
-	return base
+// partialAction returns the CF1 result a script printed for tool before a host
+// error cut it off: the work that line reports already happened on the host.
+func partialAction(phase, out, tool string) (probe.ActionResult, bool) {
+	var results []probe.ActionResult
+	if phase == PhaseFetch {
+		results, _ = probe.ParseFetch(out)
+	} else {
+		results, _, _ = probe.ParseApply(out)
+	}
+	for _, res := range results {
+		if res.Tool == tool {
+			return res, true
+		}
+	}
+	return probe.ActionResult{}, false
 }
 
 func renderStageRow(name string, p plan, phase string, dry bool, actions map[string]probe.ActionResult, after map[string]catalog.Observation) Row {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/indiekitai/clifleet/internal/config"
 )
@@ -210,4 +211,33 @@ func writeExample(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// ssh that connects and then hangs must not stall doctor past its budget.
+func TestDoctorTimesOutAHungHost(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte("#!/bin/sh\nif [ \"$1\" = -V ]; then echo OpenSSH_test >&2; exit 0; fi\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":/usr/bin:/bin")
+	fleet := filepath.Join(dir, "hosts.toml")
+	if err := os.WriteFile(fleet, []byte("[[hosts]]\nname = \"hung\"\nssh = \"hung\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := doctorGrace
+	doctorGrace = 0
+	t.Cleanup(func() { doctorGrace = old })
+	var out, errBuf bytes.Buffer
+	start := time.Now()
+	code := Execute([]string{"doctor", "--config", fleet, "--timeout", "1s"}, &out, &errBuf)
+	if took := time.Since(start); took > 10*time.Second {
+		t.Fatalf("doctor took %s", took)
+	}
+	if code != 2 || !strings.Contains(out.String(), "timed out after 1s") {
+		t.Fatalf("exit %d\n%s\n%s", code, out.String(), errBuf.String())
+	}
 }

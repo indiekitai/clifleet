@@ -2122,3 +2122,17 @@ func TestCodexLaggingLinkRollbackLeavesCurrent(t *testing.T) {
 		t.Fatalf("codex link %q, want %q", link, oldBin)
 	}
 }
+
+// The remote cap must stay under a short host budget, or SSH kills the
+// script before it can report "timed out".
+func TestLimitSecondsStaysUnderShortBudget(t *testing.T) {
+	for _, budget := range []time.Duration{2 * time.Second, 30 * time.Second, 59 * time.Second, 65 * time.Second} {
+		for _, fetch := range []bool{true, false} {
+			for _, kind := range []string{catalog.MethodNpm, catalog.MethodBrew, catalog.KindRelease} {
+				if got := limitSeconds(fetch, kind, budget); got < 1 || got >= int(budget.Seconds()) {
+					t.Errorf("budget %s fetch=%v %s: cap %ds", budget, fetch, kind, got)
+				}
+			}
+		}
+	}
+}

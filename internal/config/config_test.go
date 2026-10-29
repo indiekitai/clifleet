@@ -131,6 +131,11 @@ func TestRejects(t *testing.T) {
 		"bad path":    "[[hosts]]\nname = \"a\"\nlocal = true\npath_extra = [\"../x\"]\n",
 		"empty ssh":   "[[hosts]]\nname = \"a\"\nssh = \"\"\n",
 		"bad timeout": "timeout = \"nope\"\n[[hosts]]\nname = \"a\"\nlocal = true\n",
+		"dash ssh":    "[[hosts]]\nname = \"a\"\nssh = \"-oProxyCommand=touch/tmp/x\"\n",
+		"dash host":   "[[hosts]]\nname = \"a\"\nhost = \"-oProxyCommand=x\"\n",
+		"dash user":   "[[hosts]]\nname = \"a\"\nhost = \"h\"\nuser = \"-oProxyCommand=x\"\n",
+		"same ssh":    "[[hosts]]\nname = \"a\"\nssh = \"box\"\n[[hosts]]\nname = \"b\"\nssh = \"box\"\n",
+		"two local":   "[[hosts]]\nname = \"a\"\nlocal = true\n[[hosts]]\nname = \"b\"\nlocal = true\n",
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -175,6 +180,11 @@ func TestFilterHosts(t *testing.T) {
 	}
 	if _, err := FilterHosts(hosts, []string{"missing"}); err == nil {
 		t.Fatal("expected error")
+	}
+	// The same host named twice, or by name and alias, runs once.
+	got, err = FilterHosts(hosts, []string{"us-server", "claw1", "US-SERVER", "workshop"})
+	if err != nil || len(got) != 2 || got[0].Name != "us-server" || got[1].Name != "workshop" {
+		t.Fatalf("dedup %v %v", got, err)
 	}
 }
 
