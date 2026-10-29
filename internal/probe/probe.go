@@ -106,19 +106,26 @@ cf_kill_tree() {
   cf_kt_ids=$(cf_tree "$1:*")
   kill "$1" $(cf_ids_pids $cf_kt_ids) 2>/dev/null || true
   sleep 1
-  if [ -n "$cf_kt_ids" ]; then
-    cf_kt_ids=$(cf_tree $cf_kt_ids)
-    if [ -n "$cf_kt_ids" ]; then
-      kill -9 $(cf_ids_pids $cf_kt_ids) 2>/dev/null || true
-    fi
-  elif kill -0 "$1" 2>/dev/null; then
-    # No usable ps: only the direct child can be named.
-    kill -9 "$1" 2>/dev/null || true
-  fi
+  case $cf_kt_ids in
+    *:_*)
+      cf_kt_ids=$(cf_tree $cf_kt_ids)
+      if [ -n "$cf_kt_ids" ]; then
+        kill -9 $(cf_ids_pids $cf_kt_ids) 2>/dev/null || true
+      fi
+      ;;
+    *)
+      # No start times (BusyBox ps) or no ps at all: a PID alone cannot be
+      # trusted a second later, so only the direct child gets the KILL.
+      if kill -0 "$1" 2>/dev/null; then
+        kill -9 "$1" 2>/dev/null || true
+      fi
+      ;;
+  esac
 }
 
 # cf_tree ID... prints PID:START for each live process matching an ID, and
 # for all of their descendants. An ID is PID:START, or PID:* for any start.
+# Without a start time (BusyBox ps has no lstart) only PID:* matches.
 cf_tree() {
   { ps -A -o pid= -o ppid= -o lstart= 2>/dev/null || ps -A -o pid= -o ppid= 2>/dev/null || ps -o pid= -o ppid= 2>/dev/null; } | awk -v ids="$*" '
     BEGIN { n = split(ids, a, " "); for (i = 1; i <= n; i++) want[a[i]] = 1 }
@@ -129,7 +136,7 @@ cf_tree() {
       start[$1] = st
     }
     END {
-      for (p in parent) if (((p ":" start[p]) in want) || ((p ":*") in want)) seen[p] = 1
+      for (p in parent) if ((start[p] != "" && (p ":" start[p]) in want) || ((p ":*") in want)) seen[p] = 1
       changed = 1
       while (changed) {
         changed = 0

@@ -579,30 +579,44 @@ func npmLike(bin string, prefix []string, spec Spec, obs Observation) (*Command,
 	return &Command{Argv: argv, Method: bin, Display: shellquote.Display(argv), Package: pkg}, nil
 }
 
-// npmPackage picks the package an npm-style upgrade installs. A known package
-// found in the resolved path comes first, then the name read from disk. A
-// platform subpackage on disk (@openai/codex-darwin-arm64) maps back to the
-// tool's package; installing it at the top level would add a package, not
-// upgrade one.
+// npmPackage picks the package an npm-style upgrade installs.
+//
+// The name read from disk wins, so an alias install (a directory named
+// @opencode/cli holding opencode-ai) upgrades the package it really is. It
+// loses only when its own directory sits inside a known package found in
+// the path: a platform subpackage or dependency nested in @openai/codex
+// belongs to @openai/codex. A hoisted platform subpackage
+// (@openai/codex-linux-x64) maps back to the tool's package. Installing
+// either at the top level would add a package, not upgrade one.
 func npmPackage(spec Spec, obs Observation) string {
-	if pkg := inferPackage(obs.Real); pkg != "" {
-		return pkg
+	known, at := inferPackage(obs.Real)
+	where := obs.Real
+	if known == "" {
+		known, at = inferPackage(obs.Path)
+		where = obs.Path
 	}
-	if pkg := inferPackage(obs.Path); pkg != "" {
-		return pkg
-	}
-	if obs.Package != "" {
-		if rest, ok := strings.CutPrefix(obs.Package, spec.Npm+"-"); ok && spec.Npm != "" && platformSuffixRe.MatchString(rest) {
-			return spec.Npm
+	if obs.Package == "" {
+		if known != "" {
+			return known
 		}
-		return obs.Package
+		return spec.Npm
 	}
-	return spec.Npm
+	if known != "" && known != obs.Package {
+		if disk := strings.Index(where, "/node_modules/"+obs.Package+"/"); disk > at {
+			return known
+		}
+	}
+	if rest, ok := strings.CutPrefix(obs.Package, spec.Npm+"-"); ok && spec.Npm != "" && platformSuffixRe.MatchString(rest) {
+		return spec.Npm
+	}
+	return obs.Package
 }
 
 var platformSuffixRe = regexp.MustCompile(`^(darwin|linux|win32|freebsd)-[a-z0-9]+(-[a-z0-9]+)?$`)
 
-func inferPackage(path string) string {
+// inferPackage returns the known package found in path and the index of its
+// node_modules segment, or "" and -1.
+func inferPackage(path string) (string, int) {
 	known := []string{
 		"@anthropic-ai/claude-code",
 		"@openai/codex",
@@ -628,7 +642,7 @@ func inferPackage(path string) string {
 			best, at = pkg, i
 		}
 	}
-	return best
+	return best, at
 }
 
 var (

@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -823,5 +824,19 @@ tools = ["claude", "codex"]
 	}
 	if saw["codex"].Status != StFailed || !strings.Contains(saw["codex"].Detail, "timed out") {
 		t.Fatalf("codex %+v", saw["codex"])
+	}
+}
+
+// Ctrl-C during the probe is not an unreachable host.
+func TestInterruptedProbeIsNotUnreachable(t *testing.T) {
+	cfg := parseFleet(t, "[[hosts]]\nname = \"box\"\nssh = \"box\"\ntools = [\"claude\"]\n")
+	fake := &fakeRunner{fail: map[string]error{"box": fmt.Errorf("%w before the remote step started", runner.ErrInterrupted)}}
+	report, err := Status(context.Background(), cfg, Options{}, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := report.Hosts[0].Rows[0]
+	if row.Status == StUnreachable || row.Status != StFailed || !strings.Contains(row.Detail, "interrupted") || !report.Failed() {
+		t.Fatalf("%+v", row)
 	}
 }

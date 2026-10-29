@@ -605,3 +605,19 @@ func TestCustomNativeRecipeIsNotStaged(t *testing.T) {
 		t.Fatal("an overlay without native marked the spec custom")
 	}
 }
+
+func TestNpmPackageKeepsAliasesAndNestedPackages(t *testing.T) {
+	// npm i -g @opencode/cli@npm:opencode-ai: the directory is the alias,
+	// package.json names the package that is really installed.
+	alias := present("opencode", "/usr/local/bin/opencode", "/usr/local/lib/node_modules/@opencode/cli/bin/opencode", "1.0.0")
+	alias.Package = "opencode-ai"
+	if got := npmPackage(Resolve("opencode", nil), alias); got != "opencode-ai" {
+		t.Fatalf("alias upgraded as %q", got)
+	}
+	// A dependency nested in the tool's package is not the package to install.
+	helper := present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/node_modules/some-helper/bin/codex.js", "0.1.0")
+	helper.Package = "some-helper"
+	if got := npmPackage(Resolve("codex", nil), helper); got != "@openai/codex" {
+		t.Fatalf("nested helper %q", got)
+	}
+}

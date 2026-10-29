@@ -571,3 +571,45 @@ func TestManifestChecksumWithoutIntervals(t *testing.T) {
 		}
 	}
 }
+
+// A PID that changed hands between the TERM and the KILL is someone else's.
+// A stand-in ps reports the process under a new start time on the second
+// look, as the system would after reusing the PID.
+func TestKillTreeSkipsAReusedPID(t *testing.T) {
+	root := t.TempDir()
+	body := scriptFns + `
+cf_dir=` + root + `
+sleep 317 &
+r=$!
+# Double fork: init reaps x once it dies, so kill -0 cannot see a zombie.
+( ( trap '' TERM; exec sleep 317 ) & printf '%s\n' "$!" >"$cf_dir/x" )
+x=$(cat "$cf_dir/x")
+ps() {
+  n=$(cat "$cf_dir/psn" 2>/dev/null || echo 0)
+  n=$((n + 1))
+  printf '%s\n' "$n" >"$cf_dir/psn"
+  if [ "$n" -eq 1 ]; then
+    printf '%s %s %s\n' "$r" 1 "Thu Oct 29 10:00:00 2026" "$x" "$r" "Thu Oct 29 10:00:01 2026"
+  else
+    printf '%s %s %s\n' "$x" 1 "Thu Oct 29 10:00:05 2026"
+  fi
+}
+cf_kill_tree "$r"
+sleep 1
+if kill -0 "$x" 2>/dev/null; then echo spared; else echo killed; fi
+# Without start times (BusyBox) a bare PID is not trusted for the KILL either.
+rm -f "$cf_dir/psn"
+ps() {
+  printf '%s %s\n' "$r" 1 "$x" "$r"
+}
+cf_kill_tree "$r"
+sleep 1
+if kill -0 "$x" 2>/dev/null; then echo spared; else echo killed; fi
+kill -9 "$x" 2>/dev/null
+wait 2>/dev/null
+`
+	out := runSh(t, body, []string{"PATH=/usr/bin:/bin", "HOME=" + root})
+	if strings.Count(out, "spared") != 2 {
+		t.Fatalf("KILL reached a process that only reused a PID:\n%s", out)
+	}
+}

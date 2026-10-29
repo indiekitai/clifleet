@@ -78,6 +78,9 @@ func (Exec) Run(ctx context.Context, target Target, script string) (string, stri
 		}
 		return out, errOut, errors.New(msg)
 	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return out, errOut, fmt.Errorf("%w%s", ErrInterrupted, interruptNote(out, errOut))
+	}
 	if err != nil {
 		msg := err.Error()
 		if tail := tail(errOut, 12); tail != "" {
@@ -124,13 +127,28 @@ func SSHArgs(target Target) []string {
 	return append(DialArgs(target), "sh", "-s")
 }
 
-func timeoutMessage(target Target, stdout, stderr string) string {
-	msg := fmt.Sprintf("timed out after %s", target.Timeout.Round(time.Second))
-	script := strings.Contains(stdout, "clifleet-script/1") || strings.Contains(stderr, "clifleet-script/1")
-	proto := strings.Contains(stdout, "clifleet-probe/1") ||
+// ErrInterrupted is returned when the caller cancelled the run (Ctrl-C).
+// Killing the local ssh does not stop a remote script that already started.
+var ErrInterrupted = errors.New("interrupted")
+
+func interruptNote(stdout, stderr string) string {
+	if started(stdout) || strings.Contains(stdout, "clifleet-script/1") || strings.Contains(stderr, "clifleet-script/1") {
+		return "; the remote step had started and may still be running on the host"
+	}
+	return " before the remote step started"
+}
+
+func started(stdout string) bool {
+	return strings.Contains(stdout, "clifleet-probe/1") ||
 		strings.Contains(stdout, "clifleet-upgrade/1") ||
 		strings.Contains(stdout, "clifleet-fetch/1") ||
 		strings.Contains(stdout, "clifleet-apply/1")
+}
+
+func timeoutMessage(target Target, stdout, stderr string) string {
+	msg := fmt.Sprintf("timed out after %s", target.Timeout.Round(time.Second))
+	script := strings.Contains(stdout, "clifleet-script/1") || strings.Contains(stderr, "clifleet-script/1")
+	proto := started(stdout)
 	switch {
 	case proto:
 		msg += "; the remote command started but did not finish"

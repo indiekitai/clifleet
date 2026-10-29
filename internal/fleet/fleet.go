@@ -4,6 +4,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -275,7 +276,7 @@ func runFleet(ctx context.Context, cfg config.Loaded, opt Options, run runner.Ru
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			case <-ctx.Done():
-				report.Hosts[i] = hostError(hosts[i], ctx.Err().Error())
+				report.Hosts[i] = hostError(hosts[i], "interrupted before this host started")
 				return
 			}
 			report.Hosts[i] = oneHost(ctx, cfg, hosts[i], opt, timeout, overlays, run, upgrade)
@@ -338,6 +339,10 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 	stdout, stderr, err := run.Run(ctx, target, script)
 	if err != nil {
 		progress(opt, "✗ %s  %s", host.Name, err.Error())
+		if errors.Is(err, runner.ErrInterrupted) {
+			// The host answered or never got asked; it is not unreachable.
+			return downRows(host, names, err.Error(), StFailed)
+		}
 		return unreachable(host, names, err.Error())
 	}
 	obs, err := probe.ParseProbe(stdout)
@@ -574,13 +579,18 @@ func failedRow(name string, p plan, detail string) Row {
 }
 
 func unreachable(h config.Host, names []string, msg string) HostResult {
+	return downRows(h, names, msg, StUnreachable)
+}
+
+// downRows fails every tool on a host whose probe did not come back.
+func downRows(h config.Host, names []string, msg, status string) HostResult {
 	out := hostError(h, msg)
 	short := firstLine(msg)
 	if len(short) > 100 {
 		short = short[:100] + "…"
 	}
 	for _, name := range names {
-		out.Rows = append(out.Rows, Row{Tool: name, Status: StUnreachable, Detail: short, Failed: true})
+		out.Rows = append(out.Rows, Row{Tool: name, Status: status, Detail: short, Failed: true})
 	}
 	return out
 }

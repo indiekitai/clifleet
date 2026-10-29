@@ -25,7 +25,12 @@ Operational state for whoever maintains the **public product** and Fan's **perso
 
 Checked against `origin/main` on 2026-10-29 (Asia/Tokyo). Tip SHA, PR #2–#4 subjects, the `v0.1.0` tag, Go 1.22, topics, and the release ldflags line match this file. No open PRs. The only correction from the earlier draft: ldflags are already wired for **tag** builds, not still missing.
 
-- Since 2026-10-29 evening `main` moves by **direct push** (no PRs; owner's call). `08233f6` fixed five staged-apply must-fix issues (vendor-layout gate, rollback reporting, Codex/Cursor link handling); the next push adds ssh `--` / dash-destination rejection, duplicate-host rejection, a doctor deadline, short-budget caps, and partial-output salvage for apply / one-shot. Read the tip with `git log origin/main -1`.
+- Since 2026-10-29 evening `main` moves by **direct push** (no PRs; owner's call). Read the tip with `git log origin/main -1`. What landed that evening, after PR #5:
+  - `08233f6` staged apply: vendor-layout gate, honest rollback reporting, Codex/Cursor link handling
+  - `1bce61c` orchestration: ssh `--` and dash-destination rejection, duplicate-host rejection, doctor deadline, short-budget caps, partial-output salvage for apply / one-shot
+  - `2d1be27` shell: whole-process-tree kill on caps, stalled-download cutoff, mawk-safe checksum, tab/newline paths, npm bin-link rollback
+  - `4ea23b5` catalog: Volta and mise/asdf `installs/` are managed, whole-segment npm package match, custom `native` recipes are not staged
+  - Then: Ctrl-C is reported as `interrupted`, not `unreachable`; the kill-tree KILL trusts only PID+start time (BusyBox without `lstart` falls back to the direct child); npm aliases keep their real package name
 - `1cad8412` — squash-merge of **PR #4** (*Harden staged apply against mise shims, keychain rollbacks, and summary counts*)
 - Prior merges worth knowing:
   - **PR #3** `b35f40c8` — staged upgrade is the default path (npm atomic temp-prefix apply, brew PATH / `shellenv`, native stage budget, engines preflight)

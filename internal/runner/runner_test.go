@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -44,5 +45,17 @@ func TestTimeoutSaysWhetherTheScriptStarted(t *testing.T) {
 	}
 	if time.Since(start) > 6*time.Second {
 		t.Fatalf("timeout did not kill the process group: %s", time.Since(start))
+	}
+}
+
+func TestInterruptIsNotATimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}()
+	_, _, err := Exec{}.Run(ctx, Target{Local: true, Timeout: time.Minute}, "printf '%s\\n' clifleet-apply/1\nsleep 5\n")
+	if !errors.Is(err, ErrInterrupted) || !strings.Contains(err.Error(), "may still be running") || strings.Contains(err.Error(), "timed out") {
+		t.Fatal(err)
 	}
 }
