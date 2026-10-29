@@ -72,6 +72,8 @@ func paint(status string) string {
 	case strings.HasPrefix(status, "failed"),
 		strings.HasPrefix(status, "unreachable"):
 		return "\033[31m" + status + "\033[0m"
+	case strings.HasPrefix(status, "update available"):
+		return "\033[33m" + status + "\033[0m"
 	default:
 		return "\033[2m" + status + "\033[0m"
 	}

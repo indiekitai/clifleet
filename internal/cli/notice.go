@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/indiekitai/clifleet/internal/selfupdate"
+	"github.com/indiekitai/clifleet/internal/semver"
 )
 
 // The newer-release notice asks GitHub at most once a day (once an hour
@@ -33,7 +34,7 @@ func updateNotice(ctx context.Context, now time.Time, current string) string {
 	if os.Getenv("CLIFLEET_NO_UPDATE_CHECK") != "" {
 		return ""
 	}
-	if _, ok := selfupdate.Compare(current, current); !ok {
+	if _, ok := semver.Compare(current, current); !ok {
 		return ""
 	}
 	path, err := cachePath("update-check.json")
@@ -69,7 +70,7 @@ func noticeFor(current, latest string) string {
 	if strings.TrimSpace(latest) == "" {
 		return ""
 	}
-	if cmp, ok := selfupdate.Compare(current, latest); !ok || cmp >= 0 {
+	if cmp, ok := semver.Compare(current, latest); !ok || cmp >= 0 {
 		return ""
 	}
 	return fmt.Sprintf("clifleet %s is available (this is %s). Run clifleet update.", latest, current)

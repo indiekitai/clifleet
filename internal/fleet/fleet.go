@@ -12,6 +12,7 @@ import (
 
 	"github.com/indiekitai/clifleet/internal/catalog"
 	"github.com/indiekitai/clifleet/internal/config"
+	"github.com/indiekitai/clifleet/internal/latest"
 	"github.com/indiekitai/clifleet/internal/probe"
 	"github.com/indiekitai/clifleet/internal/runner"
 )
@@ -30,6 +31,7 @@ const (
 	StNoStage     = "no-stage"
 	StApplied     = "applied"
 	StBlocked     = "blocked"
+	StBehind      = "update available"
 )
 
 // StatusBudget is the per-host cap for status when the fleet file does not
@@ -56,6 +58,10 @@ type Options struct {
 	Phase      string
 	OneShot    bool
 	OnProgress func(string)
+	// Latest returns the newest version on a channel, or "" when unknown.
+	// nil skips the lookup: no LATEST column, and fetch downloads every
+	// stageable tool.
+	Latest func(context.Context, latest.Query) string
 }
 
 func (o Options) phase() string {
@@ -71,6 +77,7 @@ func (o Options) phase() string {
 type Row struct {
 	Tool       string `json:"name"`
 	Version    string `json:"version,omitempty"`
+	Latest     string `json:"latest,omitempty"`
 	VersionRaw string `json:"version_raw,omitempty"`
 	Method     string `json:"method,omitempty"`
 	Status     string `json:"status"`
@@ -105,6 +112,11 @@ type plan struct {
 	obs   catalog.Observation
 	dec   catalog.Decision
 	stage catalog.StagePlan
+	// latest is the newest version the control machine found. current means
+	// the installed version already is that one on the fetch channel, so the
+	// tool is not fetched.
+	latest  string
+	current bool
 }
 
 // Failed is true when any host could not be contacted or an upgrade command failed.
@@ -133,7 +145,7 @@ func (r Report) Summary() string {
 		return fmt.Sprintf("dry-run · %d %s · no connections opened", hosts, hostWord)
 	}
 	var installed, missing, upgraded, current, skipped, would, failedTools, failedHosts int
-	var staged, nostage, applied, blocked int
+	var staged, nostage, applied, blocked, behind int
 	seenFail := map[string]bool{}
 	for _, h := range r.Hosts {
 		hostFailed := h.Error != ""
@@ -150,6 +162,8 @@ func (r Report) Summary() string {
 				applied++
 			case StCurrent:
 				current++
+			case StBehind:
+				behind++
 			case StSkipped:
 				skipped++
 			case StDryRun:
@@ -199,6 +213,10 @@ func (r Report) Summary() string {
 	if r.Command == "upgrade" {
 		return fmt.Sprintf("%d %s · %d upgraded · %d up to date · %d no-stage · %d blocked · %d skipped · %s",
 			hosts, hostWord, upgraded+applied, current, nostage, blocked, skipped+missing, failed)
+	}
+	if current+behind > 0 {
+		return fmt.Sprintf("%d %s · %d installed · %d update available · %d not installed · %s",
+			hosts, hostWord, installed+current+behind, behind, missing, failed)
 	}
 	return fmt.Sprintf("%d %s · %d installed · %d not installed · %s",
 		hosts, hostWord, installed, missing, failed)
@@ -375,13 +393,6 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 		p := plan{spec: specs[i], obs: o, dec: dec}
 		if phase != PhaseUpgrade || safe {
 			p.stage = catalog.PlanStage(specs[i], o, override)
-			if p.stage.Action == catalog.ActionStage {
-				staged = append(staged, probe.StageStep{
-					Tool: name, Kind: p.stage.Kind, Package: p.stage.Package,
-					BrewKind: p.stage.BrewKind, BrewToken: p.stage.BrewToken,
-					Release: p.stage.Release,
-				})
-			}
 		}
 		plans[i] = p
 		// Only an installed tool with a concrete command is eligible.
@@ -390,11 +401,24 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 			steps = append(steps, probe.Step{Tool: name, Cmd: *dec.Command})
 		}
 	}
+	// Apply installs what fetch staged and checks the version itself; only a
+	// download is skipped for a tool that is already current.
+	markLatest(ctx, opt, plans, host.Methods, phase == PhaseFetch || safe)
+	for i, name := range names {
+		p := plans[i]
+		if p.stage.Action == catalog.ActionStage && !p.current {
+			staged = append(staged, probe.StageStep{
+				Tool: name, Kind: p.stage.Kind, Package: p.stage.Package,
+				BrewKind: p.stage.BrewKind, BrewToken: p.stage.BrewToken,
+				Release: p.stage.Release,
+			})
+		}
+	}
 	if phase == PhaseFetch || phase == PhaseApply {
-		return finishStage(ctx, result, target, run, opt, phase, names, plans, staged, tools, host.PathExtra)
+		return withLatest(finishStage(ctx, result, target, run, opt, phase, names, plans, staged, tools, host.PathExtra), plans, false)
 	}
 	if safe {
-		return finishSafe(ctx, result, target, run, opt, names, plans, staged, tools, host.PathExtra)
+		return withLatest(finishSafe(ctx, result, target, run, opt, names, plans, staged, tools, host.PathExtra), plans, false)
 	}
 
 	var exits map[string]int
@@ -452,7 +476,7 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 	} else {
 		progress(opt, "✓ %s", host.Name)
 	}
-	return result
+	return withLatest(result, plans, !upgrade)
 }
 
 func renderRow(name string, p plan, upgrade, dry bool, exits map[string]int, after map[string]catalog.Observation) Row {
@@ -630,11 +654,17 @@ func firstLine(s string) string {
 }
 
 // Lines renders plain table rows in host order.
+// The LATEST column only shows when some row has a newest version.
 func (r Report) Lines() [][]string {
+	withLatest := r.hasLatest()
 	var out [][]string
 	for _, h := range r.Hosts {
 		if len(h.Rows) == 0 && h.Error != "" {
-			out = append(out, []string{h.Name, "—", "—", "—", h.Error})
+			line := []string{h.Name, "—", "—", "—", h.Error}
+			if withLatest {
+				line = []string{h.Name, "—", "—", "—", "—", h.Error}
+			}
+			out = append(out, line)
 			continue
 		}
 		for _, row := range h.Rows {
@@ -657,10 +687,37 @@ func (r Report) Lines() [][]string {
 					status = row.Status + " (" + row.Detail + ")"
 				}
 			}
+			if withLatest {
+				newest := row.Latest
+				if newest == "" {
+					newest = "—"
+				}
+				out = append(out, []string{h.Name, row.Tool, version, newest, method, status})
+				continue
+			}
 			out = append(out, []string{h.Name, row.Tool, version, method, status})
 		}
 	}
 	return out
+}
+
+// Header names the columns of Lines.
+func (r Report) Header() []string {
+	if r.hasLatest() {
+		return []string{"HOST", "TOOL", "VERSION", "LATEST", "METHOD", "STATUS"}
+	}
+	return []string{"HOST", "TOOL", "VERSION", "METHOD", "STATUS"}
+}
+
+func (r Report) hasLatest() bool {
+	for _, h := range r.Hosts {
+		for _, row := range h.Rows {
+			if row.Latest != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Errors lists host-level failures in fleet order.

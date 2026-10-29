@@ -147,6 +147,9 @@ func renderSafeRow(name string, p plan, dry bool, fetched, applied map[string]pr
 	if p.stage.Action != catalog.ActionStage {
 		return renderStageRow(name, p, PhaseFetch, dry, nil, nil)
 	}
+	if p.current {
+		return currentRow(name, p)
+	}
 	if dry {
 		row := presentRow(name, p, StDryRun, "", false)
 		row.Method = p.stage.Method
@@ -259,6 +262,9 @@ func renderStageRow(name string, p plan, phase string, dry bool, actions map[str
 	default:
 		return presentRow(name, p, StFailed, "unknown stage action", true)
 	}
+	if p.current {
+		return currentRow(name, p)
+	}
 
 	cmd := p.stage.Fetch
 	if phase == PhaseApply {
@@ -332,5 +338,13 @@ func renderStageRow(name string, p plan, phase string, dry bool, actions map[str
 		return row
 	}
 	row.Status = StApplied
+	return row
+}
+
+// currentRow is a tool fetch skipped: its installed version already is the
+// newest one the control machine found on its channel.
+func currentRow(name string, p plan) Row {
+	row := presentRow(name, p, StCurrent, "", false)
+	row.Method = p.stage.Method
 	return row
 }

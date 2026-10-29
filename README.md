@@ -180,13 +180,17 @@ clifleet history --hosts us-server --only codex
 `status` prints one row per host and candidate. A host with no allowlist has one row for every default name; this sample is only the first few:
 
 ```text
-HOST        TOOL      VERSION    METHOD  STATUS
-laptop      claude    2.1.44     native  installed
-laptop      codex     —          —       not installed
-laptop      opencode  1.19.4     brew    installed
-us-server   claude    2.1.40     npm     installed
-us-server   codex     0.163.0    native  installed
+HOST        TOOL      VERSION    LATEST     METHOD  STATUS
+laptop      claude    2.1.44     2.1.44     native  up to date
+laptop      codex     —          —          —       not installed
+laptop      opencode  1.19.4     1.19.6     brew    update available
+us-server   claude    2.1.40     2.1.44     npm     update available
+us-server   codex     0.163.0    0.163.0    native  up to date
 ```
+
+`LATEST` is the newest version on the channel each tool was installed from: the npm registry, the Homebrew API, or the vendor's own release endpoint (the same one fetch downloads from). clifleet asks once per tool from the machine you run it on, not from the hosts, so it uses your proxy settings. A tool whose lookup fails keeps an empty `LATEST` and the status `installed`; a failed lookup never fails `status`. `--no-latest` skips the lookups.
+
+`upgrade` and `upgrade --fetch` use the same answer: a tool already on the newest version is `up to date` and is not downloaded. When the lookup fails or the installed version cannot be read, the tool is fetched as before. `--apply` never skips on this check.
 
 `us-server` has no OpenCode row, because OpenCode is not on that host's allowlist. `shanghai` would have a `dsh` row of its own.
 

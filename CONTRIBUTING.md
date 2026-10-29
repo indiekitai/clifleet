@@ -76,5 +76,6 @@ installer for a missing binary.
 - A missing tool never produces an install command, including under `--fetch`.
 - `--only` cannot widen a host allowlist.
 - `dsh` (and the other opt-in names) stay out of `DefaultTools()`.
+- Fetch skips a tool only when its installed version equals the newest one on its fetch channel; a failed lookup or unreadable version still fetches, and apply ignores the lookup.
 
 Fleet and ops state for a live install is in [docs/HANDOFF.md](docs/HANDOFF.md). This file stays the product rule.

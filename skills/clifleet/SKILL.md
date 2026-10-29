@@ -40,7 +40,7 @@ missing tool.
 
 | Question | Command |
 | --- | --- |
-| What runs where? | `clifleet status` (`--json` to parse) |
+| What runs where, and what is behind? | `clifleet status` (`--json` to parse; `update available` rows are behind) |
 | Can I reach every host? | `clifleet doctor` |
 | What would an upgrade do? | `clifleet upgrade --dry-run` |
 | Download without replacing anything | `clifleet upgrade --fetch` |

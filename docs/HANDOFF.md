@@ -81,6 +81,12 @@ These override generic “ask first” habits for **this** product:
 4. **Download-then-atomic-swap** is the product expectation. Prefer staged `--fetch` then `--apply`. Avoid disruptive `--one-shot` / in-place updaters unless Fan asks.
 5. Suggested ops pattern he already used: **fetch first**, report, then apply when he says so (e.g. 「全部 apply」). Do not invent a long unattended apply without timing OK.
 
+## Newest-version check (main, after v0.2.2)
+
+`status` has a LATEST column and `upgrade` / `--fetch` skip tools already on the newest version (looked up from the control machine: npm registry, formulae.brew.sh, the Codex / Claude / Cursor release endpoints). Known gaps: a Homebrew **tap** formula (mac-studio's opencode is `anomalyco/tap/opencode-v2`) is not in the formulae.brew.sh API, so LATEST stays empty and fetch still runs; native tools with no npm spec (opencode native on omarchy / claw1, aider, hermes, agy) show no LATEST.
+
+Host facts found 2026-10-30: mbp's proxy is set by `proxy_on` in `~/.zshrc`, which clifleet's remote scripts do not read (by rule), so mbp downloads go direct; Fan could add a proxy to that host's environment if he wants. omarchy's `~/.local/bin/codex` is a hand-written wrapper over `mise x codex` (aqua backend); `mise upgrade codex` there moved it 0.162.1 → 0.165.0 on 2026-10-30.
+
 ## Fleet status (2026-10-29 22:37 JST, read-only)
 
 From `scripts/release-check.sh` (`status --json` + `upgrade --dry-run --json`, all four hosts reachable, exit 0; v0.2.1 and the new build printed the same). Newest seen: claude 2.1.312, codex 0.165.0, opencode 2.2.0, agent/cursor-agent 2026.10.22, pi 1.4.0.

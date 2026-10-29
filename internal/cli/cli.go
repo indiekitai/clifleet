@@ -18,6 +18,7 @@ import (
 
 	"github.com/indiekitai/clifleet/internal/config"
 	"github.com/indiekitai/clifleet/internal/fleet"
+	"github.com/indiekitai/clifleet/internal/latest"
 	"github.com/indiekitai/clifleet/internal/runner"
 	"github.com/indiekitai/clifleet/internal/table"
 )
@@ -124,6 +125,13 @@ SSH to each host, detect which candidate CLIs are installed, and print
 host × tool × version × install method. Missing tools show as — and
 "not installed". They are not a failure.
 
+LATEST is the newest version on the channel each tool was installed from
+(npm registry, Homebrew API, or the vendor's release endpoint), asked once
+per tool from this machine, not from the hosts. A tool on the newest
+version is "up to date", an older one "update available". A lookup that
+fails leaves LATEST empty and the row "installed"; it never fails status.
+--no-latest skips the lookups.
+
 --dry-run does not open connections. It prints the tools clifleet would
 look for after allowlists, blocklists, and --only.
 
@@ -143,6 +151,7 @@ Flags:
       --timeout DURATION Per host. Default 45s when the fleet file omits timeout, otherwise that value
       --parallel N       Concurrent sessions (default 8, max 64)
       --dry-run          Print the probe plan; do not connect
+      --no-latest        Do not look up the newest versions
       --json             Machine-readable matrix
   -v, --verbose          Include remote stderr after the table
   -h, --help
@@ -202,6 +211,13 @@ With a pipe, use set -o pipefail so tee does not hide a failed upgrade.
 --dry-run still connects, so the printed command matches the install
 method on disk, but it does not run the upgrade.
 
+Before fetching, clifleet asks (from this machine, once per tool) for the
+newest version on the channel fetch would download from. A tool whose
+installed version already equals it is "up to date" and is not
+downloaded. If the lookup fails, the tool is fetched as before. --apply
+never skips on this check; it installs what fetch staged. --no-latest
+turns the check off.
+
 Flags:
   -c, --config PATH
       --hosts LIST
@@ -211,6 +227,7 @@ Flags:
       --fetch            Stage artifacts; do not replace binaries
       --apply            Install from the staged cache
       --one-shot         Run native updaters in place instead of fetch-then-swap
+      --no-latest        Fetch every stageable tool without checking the newest version
       --dry-run
       --json
   -v, --verbose
@@ -333,9 +350,10 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 		help = upgradeHelp
 		name = "upgrade"
 	}
-	var dry, jsonOut, verbose, fetch, apply, oneShot bool
+	var dry, jsonOut, verbose, fetch, apply, oneShot, noLatest bool
 	opt, fs, err := parseFlags(args, stderr, help, func(fs *flag.FlagSet) {
 		fs.BoolVar(&dry, "dry-run", false, "do not change hosts")
+		fs.BoolVar(&noLatest, "no-latest", false, "do not look up the newest versions")
 		fs.BoolVar(&jsonOut, "json", false, "print JSON")
 		fs.BoolVar(&verbose, "verbose", false, "show remote output")
 		fs.BoolVar(&verbose, "v", false, "show remote output")
@@ -399,6 +417,9 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 		Parallel: parallel, Timeout: timeout, Verbose: verbose,
 		Phase: phase, OneShot: oneShot, OnProgress: progress,
 	}
+	if !noLatest {
+		fopt.Latest = latest.NewResolver(latestTimeout).Latest
+	}
 	var report fleet.Report
 	if upgrade {
 		report, err = fleet.Upgrade(ctx, cfg, fopt, runner.Exec{})
@@ -431,7 +452,7 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 	if len(lines) == 0 {
 		fmt.Fprintln(stdout, "no tools to check on the selected hosts")
 	} else {
-		fmt.Fprintln(stdout, table.Render([]string{"HOST", "TOOL", "VERSION", "METHOD", "STATUS"}, lines, colorEnabled(stdout)))
+		fmt.Fprintln(stdout, table.Render(report.Header(), lines, colorEnabled(stdout)))
 	}
 	fmt.Fprintln(stdout, report.Summary())
 	if upgrade && phase == fleet.PhaseUpgrade && !oneShot && reportHasNoStage(report) {
@@ -628,6 +649,9 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 	return 0
 }
+
+// latestTimeout caps each newest-version lookup.
+const latestTimeout = 10 * time.Second
 
 // doctorGrace is how long doctor waits past the connect timeout for ssh to
 // log in and run `true`.
