@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/indiekitai/clifleet/internal/catalog"
 	"github.com/indiekitai/clifleet/internal/probe"
@@ -79,7 +80,7 @@ func runStageSteps(ctx context.Context, target runner.Target, run runner.Runner,
 			continue
 		}
 		reprobe := reprobeFor(tools, step)
-		script, err := stageScript(phase, reprobe, extra, []probe.StageStep{step})
+		script, err := stageScript(phase, reprobe, extra, []probe.StageStep{step}, target.Timeout)
 		if err != nil {
 			actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: err.Error()}
 			continue
@@ -177,11 +178,11 @@ func renderSafeRow(name string, p plan, dry bool, fetched, applied map[string]pr
 	return renderStageRow(name, p, PhaseApply, false, applied, after)
 }
 
-func stageScript(phase string, tools []probe.Tool, extra []string, staged []probe.StageStep) (string, error) {
+func stageScript(phase string, tools []probe.Tool, extra []string, staged []probe.StageStep, toolTimeout time.Duration) (string, error) {
 	if phase == PhaseFetch {
-		return probe.FetchScript(extra, staged)
+		return probe.FetchScriptBudget(extra, staged, toolTimeout)
 	}
-	return probe.ApplyScript(tools, extra, staged)
+	return probe.ApplyScriptBudget(tools, extra, staged, toolTimeout)
 }
 
 func parseStage(phase, out string) (map[string]probe.ActionResult, map[string]catalog.Observation, error) {

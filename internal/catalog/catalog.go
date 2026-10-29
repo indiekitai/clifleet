@@ -384,11 +384,51 @@ func Candidates(global []string, host HostPolicy, only []string) []string {
 	return out
 }
 
+// ManagedBy reports mise or asdf when the live command is a version-manager
+// shim, including a shim that resolves to the manager binary itself.
+// clifleet does not change that manager's tool versions.
+func ManagedBy(obs Observation) (string, bool) {
+	if name := managerName(obs.Path); name != "" {
+		return name, true
+	}
+	if name := managerName(obs.Real); name != "" {
+		return name, true
+	}
+	return "", false
+}
+
+func managerName(p string) string {
+	if p == "" {
+		return ""
+	}
+	switch {
+	case strings.Contains(p, "/mise/shims/"), strings.Contains(p, "/.mise/shims/"):
+		return "mise"
+	case strings.Contains(p, "/asdf/shims/"), strings.Contains(p, "/.asdf/shims/"):
+		return "asdf"
+	}
+	base := p
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		base = p[i+1:]
+	}
+	switch base {
+	case "mise":
+		return "mise"
+	case "asdf":
+		return "asdf"
+	default:
+		return ""
+	}
+}
+
 // Decide chooses an upgrade command for an observation.
 // A tool that is not installed yields a skip and a nil command.
 func Decide(spec Spec, obs Observation, methodOverride string) Decision {
 	if !obs.Present {
 		return Decision{Skip: "not installed"}
+	}
+	if name, ok := ManagedBy(obs); ok {
+		return Decision{Method: name, Skip: "managed by " + name}
 	}
 	method := Classify(obs)
 	if methodOverride != "" {

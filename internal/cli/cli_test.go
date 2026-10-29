@@ -10,6 +10,20 @@ import (
 	"github.com/indiekitai/clifleet/internal/config"
 )
 
+var testCache string
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "clifleet-cache")
+	if err != nil {
+		panic(err)
+	}
+	testCache = dir
+	os.Setenv("XDG_CACHE_HOME", dir)
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 func TestStatusDryRun(t *testing.T) {
 	path := writeExample(t)
 	var out, errBuf bytes.Buffer
@@ -35,6 +49,13 @@ func TestStatusDryRun(t *testing.T) {
 	}
 	if !strings.Contains(text, "shanghai") || !strings.Contains(text, "dsh") {
 		t.Fatalf("expected shanghai/dsh in\n%s", text)
+	}
+	raw, err := os.ReadFile(filepath.Join(testCache, "clifleet", "last-report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"command": "status"`) || !strings.Contains(string(raw), `"dry_run": true`) {
+		t.Fatalf("last report:\n%s", raw)
 	}
 }
 

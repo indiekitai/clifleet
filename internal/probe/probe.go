@@ -64,7 +64,6 @@ var loginPathDirs = []string{
 	`"$HOME/.npm-global/bin"`,
 	`"$HOME/.volta/bin"`,
 	`"$HOME/bin"`,
-	`"$HOME/.local/share/mise/shims"`,
 	`/home/linuxbrew/.linuxbrew/sbin`,
 	`/home/linuxbrew/.linuxbrew/bin`,
 	`/usr/local/sbin`,
@@ -75,6 +74,14 @@ var loginPathDirs = []string{
 	// mock at ~/.linuxbrew/bin must win over /home/linuxbrew or /usr/local.
 	`"$HOME/.linuxbrew/sbin"`,
 	`"$HOME/.linuxbrew/bin"`,
+}
+
+// shimPathDirs are version-manager shims. They are appended after the real
+// prefixes so a mise or asdf shim cannot shadow ~/.local/bin. A shim that
+// is still the command we find is left alone; it is not the install target.
+var shimPathDirs = []string{
+	`"$HOME/.local/share/mise/shims"`,
+	`"$HOME/.asdf/shims"`,
 }
 
 const scriptFns = `
@@ -119,6 +126,39 @@ cf_limit() {
   flag=$cf_dir/limit.$$
   rm -f "$flag"
   "$@" </dev/null &
+  pid=$!
+  (
+    sleep "$secs"
+    if kill -0 "$pid" 2>/dev/null; then
+      printf '1\n' >"$flag"
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  ) </dev/null >/dev/null 2>&1 &
+  kpid=$!
+  status=0
+  wait "$pid" 2>/dev/null || status=$?
+  kill "$kpid" 2>/dev/null || true
+  wait "$kpid" 2>/dev/null || true
+  if [ -f "$flag" ]; then
+    return 124
+  fi
+  return "$status"
+}
+
+# cf_cap_both is cf_cap with stderr kept in a separate file. Apply uses it
+# to tell a locked macOS login keychain from a binary that printed no version.
+cf_cap_both() {
+  secs=$1
+  outfile=$2
+  errfile=$3
+  shift 3
+  : >"$outfile"
+  : >"$errfile"
+  flag="$outfile.t"
+  rm -f "$flag"
+  "$@" </dev/null >"$outfile" 2>"$errfile" &
   pid=$!
   (
     sleep "$secs"
@@ -208,18 +248,6 @@ probe_one() {
   if [ -z "$real" ]; then
     real=$path
   fi
-  verfile=$cf_dir/ver
-  if cf_cap 3 "$verfile" "$path" --version; then
-    ver=$(head -n 1 "$verfile" 2>/dev/null || true)
-  else
-    rc=$?
-    if [ "$rc" -eq 124 ]; then
-      ver="version timed out"
-    else
-      ver=$(head -n 1 "$verfile" 2>/dev/null || true)
-    fi
-  fi
-  ver=$(flatten "$ver")
   meta=$(brew_meta "$real")
   if [ -z "$meta" ]; then
     meta=$(brew_meta "$path")
@@ -230,6 +258,44 @@ probe_one() {
     kind=${meta%%|*}
     token=${meta#*|}
   fi
+  verfile=$cf_dir/ver
+  errfile=$cf_dir/ver.err
+  ver=
+  # 15s: a cold macOS CLI (opencode after brew) can miss a 3s cap and
+  # report "version timed out" after the install already succeeded.
+  if cf_cap_both 15 "$verfile" "$errfile" "$path" --version; then
+    ver=$(head -n 1 "$verfile" 2>/dev/null || true)
+  else
+    rc=$?
+    ver=$(head -n 1 "$verfile" 2>/dev/null || true)
+    if [ -z "$ver" ] && [ "$rc" -eq 124 ]; then
+      ver="version timed out"
+    fi
+  fi
+  if [ -z "$ver" ] || [ "$ver" = "version timed out" ]; then
+    case $token in
+      ''|-*|*[!A-Za-z0-9_@+.-]*) ;;
+      *)
+        if command -v brew >/dev/null 2>&1; then
+          bfile=$cf_dir/brewver
+          if cf_cap 8 "$bfile" brew list --versions "$token"; then
+            bver=$(head -n 1 "$bfile" 2>/dev/null | awk '{print $2}')
+            if [ -n "$bver" ]; then
+              ver=$bver
+            fi
+          fi
+        fi
+        ;;
+    esac
+  fi
+  if [ -z "$ver" ] || [ "$ver" = "version timed out" ]; then
+    noise=$(cat "$verfile" "$errfile" 2>/dev/null || true)
+    low=$(printf '%s\n' "$noise" | tr 'A-Z' 'a-z')
+    case $low in
+      *'keychain is locked'*|*'login keychain'*) ver="keychain locked" ;;
+    esac
+  fi
+  ver=$(flatten "$ver")
   pkg=$(pkg_name "$real")
   printf 'CF1\tpresent\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$label" "$path" "$real" "$ver" "$kind" "$token" "$pkg"
 }
@@ -323,6 +389,11 @@ func writePathFn(b *strings.Builder, name, helper string, extra []string) error 
 	fmt.Fprintf(b, "%s() {\n", name)
 	for _, dir := range loginPathDirs {
 		fmt.Fprintf(b, "  %s %s\n", helper, dir)
+	}
+	if helper == "append_missing" {
+		for _, dir := range shimPathDirs {
+			fmt.Fprintf(b, "  %s %s\n", helper, dir)
+		}
 	}
 	for _, p := range extra {
 		if !validExtra(p) {

@@ -127,13 +127,13 @@ Other fields worth knowing:
 | Field | Meaning |
 | --- | --- |
 | `concurrency` | Parallel SSH sessions. Default 8, maximum 64. |
-| `timeout` | Per-host budget for `status` and for `upgrade --one-shot`. For the default upgrade, `--fetch`, and `--apply` it is the budget of **each tool**, so one slow `brew fetch` cannot fail the other tools on that host. Default `3m`. `status` uses **45s** when this field is omitted and you do not pass `--timeout`. Bare numbers are seconds. |
+| `timeout` | Per-host budget for `status` and for `upgrade --one-shot`. For the default upgrade, `--fetch`, and `--apply` it is the budget of **each tool**, so one slow `brew fetch` cannot fail the other tools on that host. Default `3m`. `status` uses **45s** when this field is omitted and you do not pass `--timeout`. Bare numbers are seconds. Release and Homebrew downloads inside a fetch use that per-tool budget, minus a few seconds, when the budget is longer than the built-in cap. A 10 minute `--timeout` can finish a large native archive. `npm pack` stays shorter. Each tool is still capped on its own. |
 | `path_extra` | Absolute directories prepended to the remote `PATH`. |
 | `methods` | Force a channel for one installed tool: `brew`, `npm`, `bun`, `pnpm`, `yarn`, or `native`. Ignored when the binary is missing. |
 
 clifleet uses your `ssh` binary, so `ProxyJump`, agent keys, `Include`, and `Match` keep working. It sets `BatchMode=yes` so a password prompt fails fast instead of hanging. It forces no TTY (`-T`, `RequestTTY=no`) so a host config cannot turn `sh -s` into an interactive prompt. A non-interactive `sh -s` does not read `.zprofile`, so the remote script puts the usual Homebrew directories on `PATH` itself (`/opt/homebrew/bin`, `/usr/local/bin`, and the Linuxbrew paths) and runs `brew shellenv` when `brew` is there. It does that again after nvm, because nvm sometimes replaces `PATH` and drops Homebrew. It does not turn off `StrictHostKeyChecking`.
 
-`clifleet doctor` only runs `true`. A line like "Connection ... port 22 succeeded" means the SSH session opened. `status` and `upgrade` then run a shell script: PATH setup, optional nvm, and `--version` for each candidate. That script can sit after doctor already returned. clifleet caps nvm at 5s and each `--version` at 3s, with stdin on `/dev/null`, so one stuck CLI cannot burn the whole host budget. Other hosts keep running. If the budget still fires, the row is `unreachable (timed out after ...)` and stderr says whether the probe script started. Narrow a live fleet while you look:
+`clifleet doctor` only runs `true`. A line like "Connection ... port 22 succeeded" means the SSH session opened. `status` and `upgrade` then run a shell script: PATH setup, optional nvm, and `--version` for each candidate. That script can sit after doctor already returned. clifleet caps nvm at 5s and each `--version` at 15s, with stdin on `/dev/null`, so one stuck CLI cannot burn the whole host budget. If that probe times out and the binary lives in Homebrew's Cellar or Caskroom, the version comes from `brew list --versions` instead. Other hosts keep running. If the budget still fires, the row is `unreachable (timed out after ...)` and stderr says whether the probe script started. Narrow a live fleet while you look:
 
 ```bash
 clifleet doctor --hosts omarchy
@@ -216,7 +216,7 @@ Fetch writes a cache on each host at `$XDG_CACHE_HOME/clifleet`, or `~/.cache/cl
 | Already installed as | Fetch | Apply |
 | --- | --- | --- |
 | npm global | `npm pack <pkg>@latest` into the cache | no-op when the staged version is already installed; otherwise `npm install -g --prefix <tmp>` and swap the package directory |
-| Homebrew formula or cask | `brew update`, then `brew fetch` into Homebrew's own cache | `brew upgrade` with auto-update off |
+| Homebrew formula or cask | `brew update`, then `brew fetch` into Homebrew's own cache. A failed `brew update` still tries `brew fetch` from the tap already on disk. Xcode or Command Line Tools that Homebrew calls too old are `blocked` with that reason | `brew upgrade` with auto-update off |
 | native Codex | `https://releases.openai.com/codex/channels/latest`, then `codex-package-<triple>.tar.gz` for that version. GitHub `rust-v<version>` is the fallback | versioned release directory, then flip the standalone `current` symlink |
 | native Claude Code | version from `downloads.claude.ai/claude-code-releases/latest`, then `manifest.json` and `<version>/<platform>/claude`. The binary's SHA256 has to match the manifest | copy into `~/.local/share/claude/versions/<version>` and retarget `~/.local/bin/claude`. The previous version file stays |
 | native OpenCode | `https://opencode.ai/update/api/latest/cli/npm` (`@opencode/cli` at the npm 2.x version; GitHub latest can still be 1.x), then `npm pack` | same temp-prefix swap as other npm packages |
@@ -235,6 +235,19 @@ These native updaters stay `no-stage`. They do not publish a stable artifact URL
 Bun, pnpm, and yarn global installs are `no-stage` as well. They do not have a pack command as direct as `npm pack`.
 
 A missing tool is still skipped. Fetch does not install it. A binary with no recipe, including the Cursor editor shim, is still `no upgrade recipe`. `dsh` stays opt-in. A cargo install is still left alone.
+
+A `mise` or `asdf` shim is not an install target. `command -v` can hit a shim that resolves to the `mise` binary (`/usr/bin/mise`); apply refuses that with `managed by mise` and does not run `mise use` or replace the version manager. Shims are appended after `~/.local/bin`, so a real binary there is the one that gets swapped.
+
+Apply does not unlock the macOS login keychain. After the staged files are in place, a `--version` that only reports `Your macOS login keychain is locked`, prints no version, or times out leaves the new symlink in place. A version token that does not match the staged release is still rolled back.
+
+The footer counts tool rows. `failed` adds `(N hosts)` when that host count is different, so three failed tools on one machine are `3 failed (1 host)` rather than `1 failed`.
+
+`status` and `upgrade` write `$XDG_CACHE_HOME/clifleet/last-report.json`, or `~/.cache/clifleet/last-report.json` when `XDG_CACHE_HOME` is unset. That file is the durable copy of a long run. If you pipe the table through `tee`, turn on `pipefail` so `tee`'s success does not hide a failed upgrade:
+
+```bash
+set -o pipefail
+clifleet upgrade 2>&1 | tee "$HOME/.cache/clifleet/upgrade.log"
+```
 
 ## Built-in catalog
 

@@ -496,6 +496,31 @@ func TestRecipeEnablesNativeUpgrade(t *testing.T) {
 	}
 }
 
+func TestManagedByShimIsNotUpgraded(t *testing.T) {
+	obs := present("codex", "/home/a/.local/share/mise/shims/codex", "/usr/bin/mise", "0.99.0")
+	name, ok := ManagedBy(obs)
+	if !ok || name != "mise" {
+		t.Fatalf("ManagedBy %+v %q %v", obs, name, ok)
+	}
+	dec := Decide(Resolve("codex", nil), obs, "native")
+	if dec.Command != nil || dec.Skip != "managed by mise" || dec.Method != "mise" {
+		t.Fatalf("override must not fight mise: %+v", dec)
+	}
+	plan := PlanStage(Resolve("codex", nil), obs, "")
+	if plan.Action != ActionSkip || plan.Reason != "managed by mise" || plan.Fetch != nil || plan.Apply != nil {
+		t.Fatalf("plan %+v", plan)
+	}
+	asdf := present("claude", "/home/a/.asdf/shims/claude", "/home/a/.asdf/shims/claude", "2.0.0")
+	dec = Decide(Resolve("claude", nil), asdf, "")
+	if dec.Command != nil || dec.Skip != "managed by asdf" {
+		t.Fatalf("asdf %+v", dec)
+	}
+	plain := present("codex", "/home/a/.local/bin/codex", "/home/a/.codex/packages/standalone/current/codex", "0.1.0")
+	if _, ok := ManagedBy(plain); ok {
+		t.Fatal("standalone codex looked managed")
+	}
+}
+
 func present(tool, path, real, version string) Observation {
 	return Observation{Tool: tool, Present: true, Path: path, Real: real, Version: version}
 }

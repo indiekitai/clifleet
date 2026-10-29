@@ -323,6 +323,92 @@ cf_atomic_link() {
   mv -f "$tmp" "$link" || { rm -f "$tmp"; return 1; }
 }
 
+# cf_version_manager prints mise or asdf when the live command is a shim
+# that resolves into the version manager. Empty means a normal binary.
+# clifleet does not run mise/asdf to change a global tool version.
+cf_version_manager() {
+  path=$1
+  case $path in
+    '' ) return 0 ;;
+    */mise/shims/*|*/.mise/shims/*) printf 'mise\n'; return 0 ;;
+    */asdf/shims/*|*/.asdf/shims/*) printf 'asdf\n'; return 0 ;;
+  esac
+  real=$(resolve "$path")
+  base=$(basename "$real")
+  case $base in
+    mise) printf 'mise\n'; return 0 ;;
+    asdf) printf 'asdf\n'; return 0 ;;
+  esac
+  case $real in
+    */mise/shims/*|*/.mise/shims/*) printf 'mise\n'; return 0 ;;
+    */asdf/shims/*|*/.asdf/shims/*) printf 'asdf\n'; return 0 ;;
+  esac
+}
+
+# cf_refuse_manager reports blocked and returns 0 when live is a shim.
+# Returns 1 when the caller should keep going.
+cf_refuse_manager() {
+  tool=$1
+  live=$2
+  mgr=$(cf_version_manager "$live")
+  if [ -z "$mgr" ]; then
+    return 1
+  fi
+  cf_report apply "$tool" blocked "managed by $mgr"
+  return 0
+}
+
+# cf_confirm_live SECONDS LIVE WANT KIND
+# KIND is "cursor" or "semver". Sets cf_confirm to match, mismatch,
+# soft-keychain, soft-timeout, or soft-empty. A missing version is soft:
+# keychain noise and a slow --version must not undo a swap that already
+# landed. A different version token is a hard mismatch.
+cf_confirm_live() {
+  secs=$1
+  live=$2
+  want=$3
+  kind=$4
+  cf_confirm=
+  cf_confirm_got=
+  out=$cf_dir/confirm.out
+  err=$cf_dir/confirm.err
+  rc=0
+  cf_cap_both "$secs" "$out" "$err" "$live" --version || rc=$?
+  line=$(head -n 5 "$out" 2>/dev/null || true)
+  tok=
+  case $kind in
+    cursor)
+      tok=$(printf '%s\n' "$line" | sed -n 's/.*\([0-9][0-9][0-9][0-9]\.[0-9][0-9]\.[0-9][0-9]-[A-Za-z0-9][A-Za-z0-9]*\).*/\1/p' | head -n 1)
+      ;;
+    *)
+      tok=$(cf_semver_line "$line")
+      ;;
+  esac
+  if [ -n "$tok" ] && [ "$tok" = "$want" ]; then
+    cf_confirm=match
+    cf_confirm_got=$tok
+    return 0
+  fi
+  if [ -n "$tok" ]; then
+    cf_confirm=mismatch
+    cf_confirm_got=$tok
+    return 0
+  fi
+  blob=$(cat "$out" "$err" 2>/dev/null || true)
+  low=$(printf '%s\n' "$blob" | tr 'A-Z' 'a-z')
+  case $low in
+    *'keychain is locked'*|*'login keychain'*)
+      cf_confirm=soft-keychain
+      return 0
+      ;;
+  esac
+  if [ "$rc" -eq 124 ]; then
+    cf_confirm=soft-timeout
+    return 0
+  fi
+  cf_confirm=soft-empty
+}
+
 cf_download() {
   out=$1
   url=$2
@@ -380,6 +466,9 @@ cf_apply_npm_safe() {
     eng=$(cf_tarball_engines "$tarball")
   fi
   live_path=$(command -v "$tool" 2>/dev/null || true)
+  if cf_refuse_manager "$tool" "$live_path"; then
+    return 0
+  fi
   live_ver=
   if [ -n "$live_path" ]; then
     live_real=$(resolve "$live_path")
@@ -914,6 +1003,10 @@ cf_standalone_root() {
 apply_release_codex() {
   tool=$1
   cf_read_release_stamp "$tool" || return 0
+  live=$(command -v "$tool" 2>/dev/null || true)
+  if cf_refuse_manager "$tool" "$live"; then
+    return 0
+  fi
   archive=$cf_rel_b
   case $archive in
     *..*) cf_report apply "$tool" 1 "refusing archive path"; return 0 ;;
@@ -939,7 +1032,6 @@ apply_release_codex() {
     staged_ver=$(cf_cmd_semver "$extract/bin/codex" --version)
   fi
   staged_ver=$(cf_semver_line "$staged_ver")
-  live=$(command -v codex 2>/dev/null || true)
   live_ver=
   if [ -n "$live" ]; then
     live_ver=$(cf_cmd_semver "$live" --version)
@@ -1027,7 +1119,10 @@ apply_release_claude() {
     cf_report apply "$tool" 1 "staged Claude binary missing"
     return 0
   fi
-  live=$(command -v claude 2>/dev/null || true)
+  live=$(command -v "$tool" 2>/dev/null || true)
+  if cf_refuse_manager "$tool" "$live"; then
+    return 0
+  fi
   if [ -z "$live" ]; then
     cf_report apply "$tool" 1 "claude is not on PATH"
     return 0
@@ -1059,15 +1154,27 @@ apply_release_claude() {
       return 0
     fi
   fi
-  got=$(cf_cmd_semver "$live" --version)
-  if [ "$got" != "$ver" ]; then
-    if [ -n "$prev" ]; then
-      cf_atomic_link "$live" "$prev" || true
-    fi
-    cf_report apply "$tool" 1 "staged Claude did not report $ver; previous binary restored"
-    return 0
-  fi
-  cf_report apply "$tool" 0 "$dest"
+  cf_confirm_live 20 "$live" "$ver" semver
+  case $cf_confirm in
+    match)
+      cf_report apply "$tool" 0 "$dest"
+      ;;
+    mismatch)
+      if [ -n "$prev" ]; then
+        cf_atomic_link "$live" "$prev" || true
+      fi
+      cf_report apply "$tool" 1 "staged Claude reported $cf_confirm_got, want $ver; previous binary restored"
+      ;;
+    soft-keychain)
+      cf_report apply "$tool" 0 "installed $ver; version check skipped (macOS login keychain is locked)"
+      ;;
+    soft-timeout)
+      cf_report apply "$tool" 0 "installed $ver; version check timed out"
+      ;;
+    *)
+      cf_report apply "$tool" 0 "installed $ver; version check did not print a version"
+      ;;
+  esac
 }
 
 apply_release_agent() {
@@ -1095,6 +1202,9 @@ cf_apply_cursor_agent() {
     return 0
   fi
   live=$(command -v "$tool" 2>/dev/null || true)
+  if cf_refuse_manager "$tool" "$live"; then
+    return 0
+  fi
   if [ -z "$live" ]; then
     cf_report apply "$tool" 1 "$tool is not on PATH"
     return 0
@@ -1152,16 +1262,27 @@ cf_apply_cursor_agent() {
       return 0
     fi
   fi
-  got_line=$(cf_cap 10 "$cf_dir/cursor-new" "$live" --version && head -n 1 "$cf_dir/cursor-new" || true)
-  got_tok=$(printf '%s\n' "$got_line" | sed -n 's/.*\([0-9][0-9][0-9][0-9]\.[0-9][0-9]\.[0-9][0-9]-[A-Za-z0-9][A-Za-z0-9]*\).*/\1/p' | head -n 1)
-  if [ "$got_tok" != "$ver" ]; then
-    if [ -n "$prev_live" ]; then cf_atomic_link "$live" "$prev_live" || true; fi
-    if [ -n "$prev_agent" ]; then cf_atomic_link "${HOME}/.local/bin/agent" "$prev_agent" || true; fi
-    if [ -n "$prev_cursor" ]; then cf_atomic_link "${HOME}/.local/bin/cursor-agent" "$prev_cursor" || true; fi
-    cf_report apply "$tool" 1 "staged Cursor Agent did not report $ver; previous symlink restored"
-    return 0
-  fi
-  cf_report apply "$tool" 0 "$final/cursor-agent"
+  cf_confirm_live 20 "$live" "$ver" cursor
+  case $cf_confirm in
+    match)
+      cf_report apply "$tool" 0 "$final/cursor-agent"
+      ;;
+    mismatch)
+      if [ -n "$prev_live" ]; then cf_atomic_link "$live" "$prev_live" || true; fi
+      if [ -n "$prev_agent" ]; then cf_atomic_link "${HOME}/.local/bin/agent" "$prev_agent" || true; fi
+      if [ -n "$prev_cursor" ]; then cf_atomic_link "${HOME}/.local/bin/cursor-agent" "$prev_cursor" || true; fi
+      cf_report apply "$tool" 1 "staged Cursor Agent reported $cf_confirm_got, want $ver; previous symlink restored"
+      ;;
+    soft-keychain)
+      cf_report apply "$tool" 0 "installed $ver; version check skipped (macOS login keychain is locked)"
+      ;;
+    soft-timeout)
+      cf_report apply "$tool" 0 "installed $ver; version check timed out"
+      ;;
+    *)
+      cf_report apply "$tool" 0 "installed $ver; version check did not print a version"
+      ;;
+  esac
 }
 `
 

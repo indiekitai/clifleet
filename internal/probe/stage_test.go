@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/indiekitai/clifleet/internal/catalog"
 )
@@ -41,8 +42,8 @@ func TestStageScriptsStayInTheirPhase(t *testing.T) {
 			t.Fatalf("fetch script contains %q", bad)
 		}
 	}
-	if strings.Count(fetch, "brew update </dev/null") != 2 {
-		t.Fatalf("brew update should be the shared preamble plus the stage_brew fallback, got %d", strings.Count(fetch, "brew update </dev/null"))
+	if strings.Count(fetch, `brew update >"$cf_dir/brew-update.log"`) != 2 {
+		t.Fatalf("brew update should be the shared preamble plus the stage_brew fallback, got %d", strings.Count(fetch, `brew update >"$cf_dir/brew-update.log"`))
 	}
 
 	apply, err := ApplyScript(
@@ -1149,6 +1150,263 @@ exit 0
 	log, err := os.ReadFile(logPath)
 	if err != nil || !strings.Contains(string(log), "--include=optional") {
 		t.Fatalf("install log:\n%s", log)
+	}
+}
+
+func TestCodexApplyRefusesMiseShim(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	bin := filepath.Join(root, "bin")
+	shimDir := filepath.Join(home, ".local", "share", "mise", "shims")
+	if err := os.MkdirAll(bin, 0o755); err != nil || os.MkdirAll(shimDir, 0o755) != nil {
+		t.Fatal(err)
+	}
+	mise := filepath.Join(bin, "mise")
+	if err := os.WriteFile(mise, []byte("MISE-BINARY\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(mise, filepath.Join(shimDir, "codex")); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(root, "codex-package.tgz")
+	writeTarGz(t, archive, map[string]string{
+		"bin/codex":          "#!/bin/sh\nprintf 'codex-cli 1.2.3\\n'\n",
+		"codex-package.json": "{\"version\":\"1.2.3\"}\n",
+	})
+	cache := filepath.Join(home, ".cache", "clifleet")
+	if err := os.MkdirAll(filepath.Join(cache, "staged"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stamp := "release\tcodex\tcodex-package.tgz\t" + archive + "\n"
+	if err := os.WriteFile(filepath.Join(cache, "staged", "codex"), []byte(stamp), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	step := StageStep{Tool: "codex", Kind: catalog.KindRelease, Release: "codex"}
+	apply, err := ApplyScript([]Tool{{Name: "codex", Binary: "codex"}}, []string{bin}, []StageStep{step})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + home}
+	out := runSh(t, apply, env)
+	results, _, err := ParseApply(out)
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	if len(results) != 1 || results[0].Blocked == "" || !strings.Contains(results[0].Blocked, "managed by mise") {
+		t.Fatalf("%+v\n%s", results, out)
+	}
+	body, err := os.ReadFile(mise)
+	if err != nil || string(body) != "MISE-BINARY\n" {
+		t.Fatalf("mise binary changed: %v %q", err, body)
+	}
+
+	// A real binary in ~/.local/bin stays ahead of the shim and can be swapped.
+	localBin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(localBin, "codex"), "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n")
+	out = runSh(t, apply, env)
+	results, obs, err := ParseApply(out)
+	if err != nil {
+		t.Fatalf("real apply: %v\n%s", err, out)
+	}
+	if len(results) != 1 || results[0].Exit != 0 || results[0].Blocked != "" {
+		t.Fatalf("real binary should swap: %+v\n%s", results, out)
+	}
+	if ShortVersion(obs["codex"].Version) != "1.2.3" {
+		t.Fatalf("reprobe %+v", obs["codex"])
+	}
+	body, err = os.ReadFile(mise)
+	if err != nil || string(body) != "MISE-BINARY\n" {
+		t.Fatalf("mise binary changed after real swap: %v %q", err, body)
+	}
+	live, err := os.ReadFile(filepath.Join(localBin, "codex"))
+	if err != nil || !strings.Contains(string(live), "1.2.3") {
+		t.Fatalf("real codex was not replaced: %v %q", err, live)
+	}
+}
+
+func TestCursorAgentKeychainDoesNotRollBack(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	localBin := filepath.Join(home, ".local", "bin")
+	oldDir := filepath.Join(home, ".local", "share", "cursor-agent", "versions", "2026.01.01-aaaa")
+	if err := os.MkdirAll(oldDir, 0o755); err != nil || os.MkdirAll(localBin, 0o755) != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(oldDir, "cursor-agent"), "#!/bin/sh\nprintf '2026.01.01-aaaa\\n'\n")
+	link := filepath.Join(localBin, "agent")
+	if err := os.Symlink(filepath.Join(oldDir, "cursor-agent"), link); err != nil {
+		t.Fatal(err)
+	}
+	ver := "2026.10.22-27dcf5f"
+	newDir := filepath.Join(home, ".local", "share", "cursor-agent", "versions", ver)
+	archive := filepath.Join(root, "agent.tgz")
+	writeTarGz(t, archive, map[string]string{
+		"payload/cursor-agent": "#!/bin/sh\nprintf '%s\\n' 'Your macOS login keychain is locked' >&2\nexit 1\n",
+	})
+	cache := filepath.Join(home, ".cache", "clifleet", "staged")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stamp := "release\tcursor-agent\t" + ver + "\t" + archive + "\n"
+	if err := os.WriteFile(filepath.Join(cache, "agent"), []byte(stamp), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	step := StageStep{Tool: "agent", Kind: catalog.KindRelease, Release: "agent"}
+	apply, err := ApplyScript([]Tool{{Name: "agent", Binary: "agent"}}, []string{localBin}, []StageStep{step})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"PATH=" + localBin + ":/usr/bin:/bin", "HOME=" + home}
+	out := runSh(t, apply, env)
+	results, _, err := ParseApply(out)
+	if err != nil {
+		t.Fatalf("keychain apply: %v\n%s", err, out)
+	}
+	if len(results) != 1 || results[0].Exit != 0 || !strings.Contains(results[0].Detail, "keychain") {
+		t.Fatalf("%+v\n%s", results, out)
+	}
+	got, err := os.Readlink(link)
+	if err != nil || !strings.Contains(got, "/versions/"+ver+"/cursor-agent") {
+		t.Fatalf("keychain noise restored the symlink: %s %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(oldDir, "cursor-agent")); err != nil {
+		t.Fatalf("old agent removed: %v", err)
+	}
+
+	// A real version token that is not the staged release still rolls back.
+	if err := os.RemoveAll(newDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(oldDir, "cursor-agent"), link); err != nil {
+		t.Fatal(err)
+	}
+	writeTarGz(t, archive, map[string]string{
+		"payload/cursor-agent": "#!/bin/sh\nprintf '2026.01.01-aaaa\\n'\n",
+	})
+	out = runSh(t, apply, env)
+	results, _, err = ParseApply(out)
+	if err != nil {
+		t.Fatalf("mismatch apply: %v\n%s", err, out)
+	}
+	if len(results) != 1 || results[0].Exit == 0 || !strings.Contains(results[0].Detail, "restored") {
+		t.Fatalf("%+v\n%s", results, out)
+	}
+	got, err = os.Readlink(link)
+	if err != nil || !strings.Contains(got, "/versions/2026.01.01-aaaa/cursor-agent") {
+		t.Fatalf("mismatch left the new symlink: %s %v", got, err)
+	}
+}
+
+func TestBrewUpdateFailureStillFetches(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil || os.MkdirAll(home, 0o755) != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(bin, "brew"), `#!/bin/sh
+if [ "$1" = update ]; then
+  printf '%s\n' 'Error: failed to update tap' >&2
+  exit 1
+fi
+if [ "$1" = fetch ]; then
+  exit 0
+fi
+exit 1
+`)
+	fetch, err := FetchScript([]string{bin}, []StageStep{{
+		Tool: "opencode", Kind: catalog.MethodBrew, BrewKind: "formula", BrewToken: "opencode",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + home}
+	out := runSh(t, fetch, env)
+	results, err := ParseFetch(out)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if len(results) != 1 || results[0].Exit != 0 || results[0].Blocked != "" {
+		t.Fatalf("fetch should survive a failed update: %+v\n%s", results, out)
+	}
+	if !strings.Contains(results[0].Detail, "existing tap") {
+		t.Fatalf("detail %+v", results[0])
+	}
+
+	writeExe(t, filepath.Join(bin, "brew"), `#!/bin/sh
+printf '%s\n' 'Error: Your Command Line Tools are too outdated.' >&2
+exit 1
+`)
+	out = runSh(t, fetch, env)
+	results, err = ParseFetch(out)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if len(results) != 1 || results[0].Blocked == "" || !strings.Contains(results[0].Blocked, "Command Line Tools") {
+		t.Fatalf("CLT should be blocked, not a bare failure: %+v\n%s", results, out)
+	}
+
+	writeExe(t, filepath.Join(bin, "brew"), `#!/bin/sh
+if [ "$1" = update ]; then exit 0; fi
+printf '%s\n' 'Error: Your Xcode (16.2) is too outdated.' >&2
+exit 1
+`)
+	out = runSh(t, fetch, env)
+	results, err = ParseFetch(out)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if len(results) != 1 || results[0].Blocked == "" || !strings.Contains(results[0].Blocked, "Xcode") {
+		t.Fatalf("Xcode should be blocked: %+v\n%s", results, out)
+	}
+}
+
+func TestReleaseFetchLimitTracksToolBudget(t *testing.T) {
+	step := StageStep{Tool: "codex", Kind: catalog.KindRelease, Release: "codex"}
+	fetch, err := FetchScript(nil, []StageStep{step})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fetch, "cf_limit 480 ") {
+		t.Fatal("default release fetch cap should be 480s")
+	}
+	long, err := FetchScriptBudget(nil, []StageStep{step}, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(long, "cf_limit 580 ") {
+		t.Fatal("10m host budget should raise the release fetch cap to 580s")
+	}
+	brew, err := FetchScript(nil, []StageStep{{
+		Tool: "opencode", Kind: catalog.MethodBrew, BrewKind: "formula", BrewToken: "opencode",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(brew, "cf_limit 180 stage_brew") {
+		t.Fatal("default brew fetch cap should stay 180s")
+	}
+	apply, err := ApplyScript([]Tool{{Name: "codex", Binary: "codex"}}, nil, []StageStep{step})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(apply, "cf_limit 180 ") {
+		t.Fatal("release apply should stay a short swap")
 	}
 }
 
