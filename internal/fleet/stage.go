@@ -198,6 +198,7 @@ func parseStage(phase, out string) (map[string]probe.ActionResult, map[string]ca
 // partialAction returns the CF1 result a script printed for tool before a host
 // error cut it off: the work that line reports already happened on the host.
 func partialAction(phase, out, tool string) (probe.ActionResult, bool) {
+	out = completeLines(out)
 	var results []probe.ActionResult
 	if phase == PhaseFetch {
 		results, _ = probe.ParseFetch(out)
@@ -210,6 +211,12 @@ func partialAction(phase, out, tool string) (probe.ActionResult, bool) {
 		}
 	}
 	return probe.ActionResult{}, false
+}
+
+// completeLines drops a last line the host error cut off mid-write, so a
+// half-printed CF1 line cannot make the parser discard the finished ones.
+func completeLines(out string) string {
+	return out[:strings.LastIndex(out, "\n")+1]
 }
 
 func renderStageRow(name string, p plan, phase string, dry bool, actions map[string]probe.ActionResult, after map[string]catalog.Observation) Row {

@@ -2136,3 +2136,98 @@ func TestLimitSecondsStaysUnderShortBudget(t *testing.T) {
 		}
 	}
 }
+
+// The new version moved its bin and added another. After a rollback the old
+// link target is back and the added bin is gone, instead of links into the
+// new layout that dangle against the restored package.
+func TestNpmRollbackRestoresBinLinks(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	bin := filepath.Join(root, "bin")
+	prefix := filepath.Join(root, "prefix")
+	liveRoot := filepath.Join(prefix, "lib", "node_modules")
+	mainDir := filepath.Join(liveRoot, "@openai", "codex")
+	cache := filepath.Join(home, ".cache", "clifleet")
+	for _, d := range []string{filepath.Join(mainDir, "bin"), bin, filepath.Join(prefix, "bin"), filepath.Join(cache, "npm", "codex"), filepath.Join(cache, "staged")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExe(t, filepath.Join(mainDir, "bin", "codex.js"), "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n")
+	if err := os.WriteFile(filepath.Join(mainDir, "package.json"), []byte("{\"name\":\"@openai/codex\",\"version\":\"1.0.0\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const oldLink = "../lib/node_modules/@openai/codex/bin/codex.js"
+	if err := os.Symlink(oldLink, filepath.Join(prefix, "bin", "codex")); err != nil {
+		t.Fatal(err)
+	}
+	// Someone else's file named like a new bin must survive both the link and the undo.
+	writeExe(t, filepath.Join(prefix, "bin", "codex-mcp"), "#!/bin/sh\necho mine\n")
+	tarball := filepath.Join(cache, "npm", "codex", "openai-codex-2.0.0.tgz")
+	writeTarGz(t, tarball, map[string]string{"package/package.json": "{\"name\":\"@openai/codex\",\"version\":\"2.0.0\"}\n"})
+	if err := os.WriteFile(filepath.Join(cache, "staged", "codex"), []byte("npm\t@openai/codex\t"+tarball+"\t2.0.0\t-\t-\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(bin, "npm"), `#!/bin/sh
+if [ "$1" = root ]; then
+  printf '%s\n' "$LIVE_ROOT"
+  exit 0
+fi
+if [ "$1" = install ]; then
+  p=.
+  last=
+  for a in "$@"; do
+    if [ "$last" = --prefix ]; then p=$a; fi
+    last=$a
+  done
+  d=$p/lib/node_modules/@openai/codex
+  mkdir -p "$d/dist"
+  printf '%s\n' '{"name":"@openai/codex","version":"2.0.0"}' > "$d/package.json"
+  printf 'codex\tdist/codex-v2.js\ncodex-extra\tdist/extra.js\ncodex-mcp\tdist/mcp.js\n' > "$d/bins.txt"
+  printf '#!/bin/sh\nexit 1\n' > "$d/dist/codex-v2.js"
+  printf '#!/bin/sh\nexit 0\n' > "$d/dist/extra.js"
+  printf '#!/bin/sh\nexit 0\n' > "$d/dist/mcp.js"
+  chmod 755 "$d/dist/codex-v2.js" "$d/dist/extra.js" "$d/dist/mcp.js"
+  exit 0
+fi
+exit 0
+`)
+	// A stand-in for node's bin-map read: the real one lives beside real CLIs.
+	writeExe(t, filepath.Join(bin, "node"), `#!/bin/sh
+case $2 in
+  *'process.exit(0)'*) exit 0 ;;
+esac
+cat "$(dirname "$CF_JSON")/bins.txt"
+`)
+	script, err := ApplyScript([]Tool{{Name: "codex", Binary: "codex"}}, []string{filepath.Join(prefix, "bin"), bin}, []StageStep{{
+		Tool: "codex", Kind: catalog.MethodNpm, Package: "@openai/codex",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := runSh(t, script, []string{
+		"PATH=" + filepath.Join(prefix, "bin") + ":" + bin + ":/usr/bin:/bin",
+		"HOME=" + home,
+		"LIVE_ROOT=" + liveRoot,
+	})
+	results, _, err := ParseApply(out)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("%v %+v\n%s", err, results, out)
+	}
+	if results[0].Exit == 0 || !strings.Contains(results[0].Detail, "restored") {
+		t.Fatalf("apply %+v\n%s", results[0], out)
+	}
+	if link, err := os.Readlink(filepath.Join(prefix, "bin", "codex")); err != nil || link != oldLink {
+		t.Fatalf("codex link %q %v, want %q", link, err, oldLink)
+	}
+	if _, err := os.Lstat(filepath.Join(prefix, "bin", "codex-extra")); !os.IsNotExist(err) {
+		t.Fatalf("bin added by the new version survived the rollback: %v", err)
+	}
+	if body, err := os.ReadFile(filepath.Join(prefix, "bin", "codex-mcp")); err != nil || !strings.Contains(string(body), "mine") {
+		t.Fatalf("foreign codex-mcp changed: %v %q", err, body)
+	}
+	still, err := exec.Command(filepath.Join(prefix, "bin", "codex"), "--version").Output()
+	if err != nil || !strings.Contains(string(still), "1.0.0") {
+		t.Fatalf("codex after rollback %v %q", err, still)
+	}
+}

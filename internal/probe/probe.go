@@ -94,6 +94,36 @@ var shimPathDirs = []string{
 }
 
 const scriptFns = `
+# cf_kill_tree PID stops PID and everything it started. Killing only PID
+# leaves the downloads and package managers a capped function started
+# running as orphans.
+# Descendants are collected before the first signal, because once PID dies
+# its children are re-parented and no longer traceable to it. Only the
+# watchdog subshells call it, so its variables never reach a caller.
+cf_kill_tree() {
+  cf_kt_kids=$(cf_descendants "$1")
+  kill "$1" $cf_kt_kids 2>/dev/null || true
+  sleep 1
+  cf_kt_kids="$cf_kt_kids $(cf_descendants "$1" $cf_kt_kids)"
+  kill -9 "$1" $cf_kt_kids 2>/dev/null || true
+}
+
+# cf_descendants PID... prints every process below the given PIDs.
+cf_descendants() {
+  { ps -A -o pid= -o ppid= 2>/dev/null || ps -o pid= -o ppid= 2>/dev/null; } | awk -v roots="$*" '
+    BEGIN { n = split(roots, r, " "); for (i = 1; i <= n; i++) seen[r[i]] = 1 }
+    { parent[$1] = $2 }
+    END {
+      changed = 1
+      while (changed) {
+        changed = 0
+        for (p in parent) {
+          if (!(p in seen) && (parent[p] in seen)) { seen[p] = 1; changed = 1; print p }
+        }
+      }
+    }'
+}
+
 # cf_cap SECONDS OUTFILE CMD... runs CMD with stdin /dev/null and kills it
 # when SECONDS elapses. A stuck --version or nvm.sh must not burn the whole
 # SSH budget. Exit 124 means the cap fired. Fast commands return immediately.
@@ -110,9 +140,7 @@ cf_cap() {
     sleep "$secs"
     if kill -0 "$pid" 2>/dev/null; then
       printf '1\n' >"$flag"
-      kill "$pid" 2>/dev/null || true
-      sleep 1
-      kill -9 "$pid" 2>/dev/null || true
+      cf_kill_tree "$pid"
     fi
   ) </dev/null >/dev/null 2>&1 &
   kpid=$!
@@ -140,9 +168,7 @@ cf_limit() {
     sleep "$secs"
     if kill -0 "$pid" 2>/dev/null; then
       printf '1\n' >"$flag"
-      kill "$pid" 2>/dev/null || true
-      sleep 1
-      kill -9 "$pid" 2>/dev/null || true
+      cf_kill_tree "$pid"
     fi
   ) </dev/null >/dev/null 2>&1 &
   kpid=$!
@@ -173,9 +199,7 @@ cf_cap_both() {
     sleep "$secs"
     if kill -0 "$pid" 2>/dev/null; then
       printf '1\n' >"$flag"
-      kill "$pid" 2>/dev/null || true
-      sleep 1
-      kill -9 "$pid" 2>/dev/null || true
+      cf_kill_tree "$pid"
     fi
   ) </dev/null >/dev/null 2>&1 &
   kpid=$!
@@ -248,6 +272,11 @@ pkg_name() {
   done
 }
 
+cf_tab=$(printf '\t')
+cf_cr=$(printf '\r')
+cf_nl='
+'
+
 flatten() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-200
 }
@@ -311,6 +340,14 @@ probe_one() {
       *'keychain is locked'*|*'login keychain'*) ver="keychain locked" ;;
     esac
   fi
+  case "$path$real" in
+    *"$cf_tab"*|*"$cf_nl"*|*"$cf_cr"*)
+      # The fields are tab-separated and line-based; a shifted field would
+      # point a later apply at the wrong file. No result fails this tool only.
+      printf 'clifleet: %s resolves to a path with a tab or newline; skipped\n' "$label" >&2
+      return 0
+      ;;
+  esac
   ver=$(flatten "$ver")
   pkg=$(pkg_name "$real")
   printf 'CF1\tpresent\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$label" "$path" "$real" "$ver" "$kind" "$token" "$pkg"
@@ -552,8 +589,8 @@ func ParseProbe(stdout string) (map[string]catalog.Observation, error) {
 			}
 			obs[name] = catalog.Observation{Tool: name, Present: false}
 		case "present":
-			if len(fields) < 9 {
-				return nil, fmt.Errorf("short present line %q", line)
+			if len(fields) != 9 {
+				return nil, fmt.Errorf("present line has %d fields, want 9: %q", len(fields), line)
 			}
 			name := fields[2]
 			if _, ok := obs[name]; ok {

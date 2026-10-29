@@ -194,3 +194,11 @@ func TestParseDurationBareSeconds(t *testing.T) {
 		t.Fatalf("%s %v", d, err)
 	}
 }
+
+// An ssh alias named "local" is another machine, not the control host.
+func TestLocalAndAnSSHAliasNamedLocalAreDifferentMachines(t *testing.T) {
+	body := "[[hosts]]\nname = \"here\"\nlocal = true\n[[hosts]]\nname = \"there\"\nssh = \"local\"\n"
+	if _, err := Parse("hosts.toml", []byte(body)); err != nil {
+		t.Fatal(err)
+	}
+}

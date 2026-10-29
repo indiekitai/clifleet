@@ -227,7 +227,12 @@ func normalize(path string, raw File) (Loaded, error) {
 		if dest, port, err := Destination(h); err != nil {
 			errs = append(errs, err)
 		} else {
-			machine := fmt.Sprintf("%s:%d", dest, port)
+			// Local runs and ssh targets never collide: an ssh alias may be
+			// named "local" and point at another machine.
+			machine := fmt.Sprintf("ssh %s:%d", dest, port)
+			if h.Local {
+				machine = "local"
+			}
 			if other, ok := machines[machine]; ok {
 				errs = append(errs, fmt.Errorf("hosts %s and %s are the same machine (%s)", other, h.Name, dest))
 			} else {

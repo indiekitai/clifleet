@@ -802,7 +802,8 @@ tools = ["claude", "codex"]
 	)
 	fake := scriptRunner(func(script string) (string, string, error) {
 		if strings.Contains(script, "clifleet-upgrade/1") {
-			return "clifleet-upgrade/1\n" + strings.Join([]string{"CF1", "upgrade", "claude", "0"}, "\t") + "\n", "", errString("timed out after 10m0s")
+			// The connection dropped while codex's line was half written.
+			return "clifleet-upgrade/1\n" + strings.Join([]string{"CF1", "upgrade", "claude", "0"}, "\t") + "\nCF1\tupgrade\tcodex\t", "", errString("timed out after 10m0s")
 		}
 		return probe, "", nil
 	})

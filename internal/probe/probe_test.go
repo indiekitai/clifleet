@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -417,5 +418,127 @@ func writeExe(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A capped shell function runs its work in child processes. When the cap
+// fires, those children must die with it instead of running on as orphans.
+func TestCapKillsTheWholeTree(t *testing.T) {
+	if out, err := exec.Command("ps", "-A", "-o", "pid=").Output(); err != nil || len(out) == 0 {
+		// macOS sandbox-exec refuses to run /bin/ps; real hosts and CI have it.
+		t.Skip("ps is not usable here")
+	}
+	root := t.TempDir()
+	body := scriptFns + `
+cf_dir=` + root + `
+slow() {
+  sleep 317 &
+  printf '%s\n' "$!" >"$cf_dir/kid"
+  wait
+}
+cf_limit 1 slow
+printf 'rc=%s\n' "$?"
+kid=$(cat "$cf_dir/kid")
+sleep 1
+if kill -0 "$kid" 2>/dev/null; then
+  kill -9 "$kid"
+  echo orphan
+else
+  echo gone
+fi
+cf_cap 1 "$cf_dir/out" slow
+printf 'rc=%s\n' "$?"
+kid=$(cat "$cf_dir/kid")
+sleep 1
+if kill -0 "$kid" 2>/dev/null; then
+  kill -9 "$kid"
+  echo orphan
+else
+  echo gone
+fi
+`
+	out := runSh(t, body, []string{"PATH=/usr/bin:/bin", "HOME=" + root})
+	if strings.Count(out, "rc=124") != 2 || strings.Contains(out, "orphan") || strings.Count(out, "gone") != 2 {
+		t.Fatalf("cap left a child running:\n%s", out)
+	}
+}
+
+// A path with a tab would shift every field after it; one with a newline would
+// split the line. The tool gets no result (it fails alone), the others still parse.
+func TestProbeSkipsPathWithTabOrNewline(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	odd := filepath.Join(root, "b\tin")
+	for _, dir := range []string{bin, odd} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// path_extra rejects such a directory, but a symlink can still resolve into one.
+	writeExe(t, filepath.Join(odd, "claude"), "#!/bin/sh\nprintf '2.1.40\\n'\n")
+	if err := os.Symlink(filepath.Join(odd, "claude"), filepath.Join(bin, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(bin, "codex"), "#!/bin/sh\nprintf 'codex-cli 0.1.0\\n'\n")
+	script, err := ProbeScript([]Tool{{Name: "claude", Binary: "claude"}, {Name: "codex", Binary: "codex"}}, []string{bin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := runSh(t, script, []string{"PATH=/usr/bin:/bin", "HOME=" + filepath.Join(root, "home")})
+	obs, err := ParseProbe(out)
+	if err != nil {
+		t.Fatalf("parse: %v\n%s", err, out)
+	}
+	if _, ok := obs["claude"]; ok {
+		t.Fatalf("claude under a tab path was reported: %+v", obs["claude"])
+	}
+	if !obs["codex"].Present || ShortVersion(obs["codex"].Version) != "0.1.0" {
+		t.Fatalf("codex %+v\n%s", obs["codex"], out)
+	}
+	if !strings.Contains(out, "tab or newline") {
+		t.Fatalf("no reason for the skipped tool:\n%s", out)
+	}
+}
+
+func TestParseProbeRejectsShiftedFields(t *testing.T) {
+	line := strings.Join([]string{"CF1", "present", "claude", "/a\tb/claude", "/a\tb/claude", "2.1.40", "", "", ""}, "\t")
+	if _, err := ParseProbe("clifleet-probe/1\n" + line + "\n"); err == nil {
+		t.Fatal("a present line with extra fields was accepted")
+	}
+}
+
+// mawk 1.3.3, still the default awk on older Debian/Ubuntu, has no {n}
+// intervals; a regex with one silently never matches.
+func TestShellAwkHasNoRegexIntervals(t *testing.T) {
+	interval := regexp.MustCompile(`[\])][{][0-9]+(,[0-9]*)?[}]`)
+	for name, src := range map[string]string{
+		"scriptPrelude": scriptPrelude, "scriptFns": scriptFns, "brewEnvSnippet": brewEnvSnippet, "nvmSnippet": nvmSnippet,
+		"applySafeShell": applySafeShell, "codexPackShell": codexPackShell,
+		"stagePrelude": stagePrelude, "fetchFns": fetchFns, "applyFns": applyFns,
+	} {
+		if m := interval.FindString(src); m != "" {
+			t.Errorf("%s uses a regex interval %q", name, m)
+		}
+	}
+}
+
+func TestManifestChecksumWithoutIntervals(t *testing.T) {
+	root := t.TempDir()
+	want := strings.Repeat("ab", 32)
+	manifest := filepath.Join(root, "manifest.json")
+	body := "{\n  \"platforms\": {\n    \"linux-x64\": {\n      \"checksum\": \"" + want + "\",\n      \"size\": 1\n    }\n  }\n}\n"
+	if err := os.WriteFile(manifest, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	awks := []string{"awk"}
+	if _, err := exec.LookPath("mawk"); err == nil {
+		awks = append(awks, "mawk")
+	}
+	for _, awk := range awks {
+		script := releaseRest + "\nawk() { command " + awk + " \"$@\"; }\ncf_manifest_checksum '" + manifest + "' linux-x64\n"
+		out := strings.TrimSpace(runSh(t, script, []string{"PATH=/usr/bin:/bin", "HOME=" + root}))
+		if out != want {
+			t.Fatalf("%s checksum %q", awk, out)
+		}
 	}
 }

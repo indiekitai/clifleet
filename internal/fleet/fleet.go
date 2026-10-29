@@ -406,7 +406,7 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 			// Keep the rows of tools whose updater finished before the host error;
 			// only the ones that never reported carry the error.
 			failed := hostError(host, err.Error())
-			partial, _, _ := probe.ParseUpgrade(upOut)
+			partial, _, _ := probe.ParseUpgrade(completeLines(upOut))
 			done := map[string]int{}
 			for _, res := range partial {
 				done[res.Tool] = res.Exit

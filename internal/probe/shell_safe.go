@@ -499,11 +499,13 @@ cf_download() {
       ;;
   esac
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --retry 2 --connect-timeout 15 -o "$out" "$url" </dev/null
+    # A stalled transfer (under 1 KiB/s for a minute) fails here instead of
+    # holding the step until cf_limit kills it with no useful message.
+    curl -fsSL --retry 2 --connect-timeout 15 --speed-limit 1024 --speed-time 60 -o "$out" "$url" </dev/null
     return $?
   fi
   if command -v wget >/dev/null 2>&1; then
-    wget -q -O "$out" "$url" </dev/null
+    wget -q -T 60 -O "$out" "$url" </dev/null
     return $?
   fi
   printf '%s\n' 'curl or wget is required' >&2
@@ -699,6 +701,7 @@ cf_npm_swap() {
     if ! cf_cap 10 "$cf_dir/checkver" "$check" --version; then
       cf_swap_err="new package did not run"
       cf_swap_rb_failed=
+      cf_unlink_npm_bins "$live_bin"
       if [ -n "$plat_dest" ]; then
         cf_swap_undo "$plat_dest" plat "$cf_sw_plat_existed"
       fi
@@ -716,33 +719,82 @@ cf_npm_swap() {
   return 0
 }
 
+# cf_link_npm_bins PKGDIR BINDIR points BINDIR at the package's bin entries
+# and records each link's previous target in $cf_dir/bins.undo, so a rollback
+# can put the old links back (cf_unlink_npm_bins). A bin path that changed
+# between versions would otherwise leave the restored install with dangling
+# links. A plain file of the same name is not npm's and is left alone.
 cf_link_npm_bins() {
-  pkgdir=$1
-  bindir=$2
-  json=$pkgdir/package.json
-  [ -f "$json" ] || return 0
+  cf_lb_pkgdir=$1
+  cf_lb_bindir=$2
+  cf_lb_undo=$cf_dir/bins.undo
+  : >"$cf_lb_undo"
+  cf_lb_json=$cf_lb_pkgdir/package.json
+  [ -f "$cf_lb_json" ] || return 0
   if ! command -v node >/dev/null 2>&1; then
     return 0
   fi
   if ! node -e 'process.exit(0)' </dev/null >/dev/null 2>&1; then
     return 0
   fi
-  list=$cf_dir/bins
-  CF_JSON=$json node -e 'var fs=require("fs"); var p=JSON.parse(fs.readFileSync(process.env.CF_JSON,"utf8")); var b=p.bin||{}; if(typeof b==="string"){ var n=(p.name||"bin").split("/").pop(); process.stdout.write(n+"\t"+b+"\n"); } else { for(var k in b){ if(Object.prototype.hasOwnProperty.call(b,k)) process.stdout.write(k+"\t"+b[k]+"\n"); } }' </dev/null > "$list" 2>/dev/null || return 0
-  while IFS="$(printf '\t')" read -r name rel || [ -n "$name" ]; do
-    [ -n "$name" ] || continue
-    case $name in
+  cf_lb_list=$cf_dir/bins
+  CF_JSON=$cf_lb_json node -e 'var fs=require("fs"); var p=JSON.parse(fs.readFileSync(process.env.CF_JSON,"utf8")); var b=p.bin||{}; if(typeof b==="string"){ var n=(p.name||"bin").split("/").pop(); process.stdout.write(n+"\t"+b+"\n"); } else { for(var k in b){ if(Object.prototype.hasOwnProperty.call(b,k)) process.stdout.write(k+"\t"+b[k]+"\n"); } }' </dev/null > "$cf_lb_list" 2>/dev/null || return 0
+  while IFS="$(printf '\t')" read -r cf_lb_name cf_lb_rel || [ -n "$cf_lb_name" ]; do
+    [ -n "$cf_lb_name" ] || continue
+    case $cf_lb_name in
       *[!A-Za-z0-9._+-]*|.*) continue ;;
     esac
-    case $rel in
+    case $cf_lb_rel in
       ''|*..*|/*) continue ;;
     esac
-    target=$pkgdir/$rel
-    [ -e "$target" ] || continue
-    tmp=$bindir/.$name.clifleet-new
-    ln -s "$target" "$tmp" || continue
-    mv -f "$tmp" "$bindir/$name" || rm -f "$tmp"
-  done < "$list"
+    cf_lb_target=$cf_lb_pkgdir/$cf_lb_rel
+    [ -e "$cf_lb_target" ] || continue
+    cf_lb_live=$cf_lb_bindir/$cf_lb_name
+    if [ -L "$cf_lb_live" ]; then
+      cf_lb_old=$(readlink "$cf_lb_live") || continue
+      case $cf_lb_old in
+        ''|*"$cf_tab"*|*"$cf_nl"*) continue ;;
+      esac
+    elif [ -e "$cf_lb_live" ]; then
+      continue
+    else
+      cf_lb_old=
+    fi
+    cf_lb_tmp=$cf_lb_bindir/.$cf_lb_name.clifleet-new
+    rm -f "$cf_lb_tmp"
+    ln -s "$cf_lb_target" "$cf_lb_tmp" || continue
+    if mv -f "$cf_lb_tmp" "$cf_lb_live"; then
+      printf '%s\t%s\n' "$cf_lb_name" "$cf_lb_old" >>"$cf_lb_undo"
+    else
+      rm -f "$cf_lb_tmp"
+    fi
+  done < "$cf_lb_list"
+}
+
+# cf_unlink_npm_bins BINDIR puts back what cf_link_npm_bins changed: the old
+# link target, or no entry for a bin the old version did not have.
+cf_unlink_npm_bins() {
+  cf_ub_bindir=$1
+  [ -f "$cf_dir/bins.undo" ] || return 0
+  while IFS="$(printf '\t')" read -r cf_ub_name cf_ub_old || [ -n "$cf_ub_name" ]; do
+    [ -n "$cf_ub_name" ] || continue
+    cf_ub_live=$cf_ub_bindir/$cf_ub_name
+    if [ -z "$cf_ub_old" ]; then
+      if rm -f "$cf_ub_live"; then
+        continue
+      fi
+    else
+      cf_ub_tmp=$cf_ub_bindir/.$cf_ub_name.clifleet-old
+      rm -f "$cf_ub_tmp"
+      if ln -s "$cf_ub_old" "$cf_ub_tmp" && mv -f "$cf_ub_tmp" "$cf_ub_live"; then
+        continue
+      fi
+      rm -f "$cf_ub_tmp"
+    fi
+    cf_swap_err="$cf_swap_err; rollback failed, could not restore bin link $cf_ub_live"
+    cf_swap_rb_failed=1
+  done < "$cf_dir/bins.undo"
+  : >"$cf_dir/bins.undo"
 }
 
 `
@@ -814,9 +866,14 @@ cf_manifest_checksum() {
   awk -v plat="$plat" '
     $0 ~ "\"" plat "\"[[:space:]]*:" { inplat = 1 }
     inplat && $0 ~ /"checksum"/ {
-      if (match($0, /[0-9a-fA-F]{64}/)) {
-        print substr($0, RSTART, RLENGTH)
-        exit
+      # No {64} interval: mawk 1.3.3 (older Debian/Ubuntu) has none.
+      s = $0
+      while (match(s, /[0-9a-fA-F]+/)) {
+        if (RLENGTH == 64) {
+          print substr(s, RSTART, RLENGTH)
+          exit
+        }
+        s = substr(s, RSTART + RLENGTH)
       }
     }
   ' "$file"
