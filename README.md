@@ -170,6 +170,9 @@ clifleet upgrade --only codex --hosts us-server
 
 clifleet doctor
 clifleet doctor --offline
+
+clifleet history
+clifleet history --hosts us-server --only codex
 ```
 
 `status` prints one row per host and candidate. A host with no allowlist has one row for every default name; this sample is only the first few:
@@ -252,7 +255,7 @@ Apply does not unlock the macOS login keychain. After the staged files are in pl
 
 The footer counts tool rows. `failed` adds `(N hosts)` when that host count is different, so three failed tools on one machine are `3 failed (1 host)` rather than `1 failed`.
 
-`status` and `upgrade` write `$XDG_CACHE_HOME/clifleet/last-report.json`, or `~/.cache/clifleet/last-report.json` when `XDG_CACHE_HOME` is unset. That file is the durable copy of a long run. If you pipe the table through `tee`, turn on `pipefail` so `tee`'s success does not hide a failed upgrade:
+`status` and `upgrade` write `$XDG_CACHE_HOME/clifleet/last-report.json`, or `~/.cache/clifleet/last-report.json` when `XDG_CACHE_HOME` is unset. That file is the durable copy of a long run. Each `upgrade`, `fetch`, or `apply` that is not `--dry-run` also appends one JSON line per host and tool to `history.jsonl` in the same directory; `clifleet history [--hosts LIST] [--only LIST] [--limit N] [--json]` reads it back, so "when did codex change on us-server" or "which host failed last time" has an answer. Tools that were not installed are not recorded. If you pipe the table through `tee`, turn on `pipefail` so `tee`'s success does not hide a failed upgrade:
 
 ```bash
 set -o pipefail

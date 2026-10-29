@@ -55,6 +55,8 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		return cmdFleet(append([]string{"--apply"}, args[1:]...), stdout, stderr, true)
 	case "doctor":
 		return cmdDoctor(args[1:], stdout, stderr)
+	case "history":
+		return cmdHistory(args[1:], stdout, stderr)
 	case "update", "self-update":
 		return cmdSelfUpdate(args[1:], stdout, stderr)
 	default:
@@ -75,6 +77,7 @@ Commands:
   fetch        Stage upgrade artifacts (same as upgrade --fetch)
   apply        Install staged artifacts (same as upgrade --apply)
   doctor       Check SSH, the fleet file, and reachability
+  history      Show past upgrade, fetch, and apply runs
   update       Update clifleet itself to the latest release (not the hosts)
   version      Print the clifleet version
 
@@ -91,6 +94,7 @@ Examples:
   clifleet upgrade --apply
   clifleet upgrade --only claude --hosts us-server
   clifleet doctor
+  clifleet history --hosts us-server
   clifleet update --check
 
 Run 'clifleet <command> --help' for command flags.
@@ -191,8 +195,9 @@ Node is blocked, not a failed apply. A mise or asdf shim is left alone
 (managed by mise or asdf).
 
 The result is also written to $XDG_CACHE_HOME/clifleet/last-report.json
-(or ~/.cache/clifleet/last-report.json). With a pipe, use set -o pipefail
-so tee does not hide a failed upgrade.
+(or ~/.cache/clifleet/last-report.json), and every run that is not
+--dry-run is appended to history.jsonl next to it (clifleet history).
+With a pipe, use set -o pipefail so tee does not hide a failed upgrade.
 
 --dry-run still connects, so the printed command matches the install
 method on disk, but it does not run the upgrade.
@@ -403,6 +408,9 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 	if werr := writeLastReport(report); werr != nil {
 		fmt.Fprintf(stderr, "clifleet: could not write last report: %s\n", werr)
 	}
+	if herr := appendHistory(report, time.Now()); herr != nil {
+		fmt.Fprintf(stderr, "clifleet: could not append history: %s\n", herr)
+	}
 	if jsonOut {
 		raw, jerr := report.JSON()
 		if jerr != nil {
@@ -447,7 +455,7 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 // XDG_CACHE_HOME is unset. A long run piped through tee can drop the table;
 // this file is still there when the process exits.
 func writeLastReport(report fleet.Report) error {
-	path, err := lastReportPath()
+	path, err := cachePath("last-report.json")
 	if err != nil {
 		return err
 	}
@@ -480,15 +488,16 @@ func writeLastReport(report fleet.Report) error {
 	return werr
 }
 
-func lastReportPath() (string, error) {
+// cachePath is name under $XDG_CACHE_HOME/clifleet, or ~/.cache/clifleet.
+func cachePath(name string) (string, error) {
 	if dir := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); dir != "" {
-		return filepath.Join(dir, "clifleet", "last-report.json"), nil
+		return filepath.Join(dir, "clifleet", name), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return "", fmt.Errorf("no home directory for the report cache")
 	}
-	return filepath.Join(home, ".cache", "clifleet", "last-report.json"), nil
+	return filepath.Join(home, ".cache", "clifleet", name), nil
 }
 
 func reportHasNoStage(report fleet.Report) bool {
