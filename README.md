@@ -339,6 +339,10 @@ CGO_ENABLED=0 go build -o clifleet ./cmd/clifleet
 
 GitHub Actions (`.github/workflows/ci.yml`) runs those on every push. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Maintainer
+
+Operational fleet state and progress for maintainers live in [docs/HANDOFF.md](docs/HANDOFF.md). Product docs stay in this README and [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
 [MIT](LICENSE)

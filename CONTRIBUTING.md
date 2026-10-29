@@ -76,3 +76,5 @@ installer for a missing binary.
 - A missing tool never produces an install command, including under `--fetch`.
 - `--only` cannot widen a host allowlist.
 - `dsh` (and the other opt-in names) stay out of `DefaultTools()`.
+
+Fleet and ops state for a live install is in [docs/HANDOFF.md](docs/HANDOFF.md). This file stays the product rule.
