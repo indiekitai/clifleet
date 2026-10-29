@@ -34,6 +34,7 @@ Checked against `origin/main` on 2026-10-29 (Asia/Tokyo). Tip SHA, PR #2–#4 su
   - `cb11ca0`: every recursive delete in remote scripts goes through `cf_rmtree`, which refuses empty, relative, `.`/`..`, `/`, `$HOME` and its parents (`TestShellDeletesTreesOnlyThroughRmtree` guards it)
   - `be8527c` + tag **`v0.2.1`**: release runs the tests first, Actions pinned to commit SHAs, build provenance attestation on the tarballs and `SHA256SUMS`; `install.sh` and `clifleet update` run `gh attestation verify` when gh is logged in (`CLIFLEET_NO_ATTESTATION=1` skips). Verified end to end 2026-10-29: release green, attestation verifies, install.sh and a real v0.2.0 → v0.2.1 update on Mac Studio
   - Tag **`v0.2.2`** (2026-10-30, release green, release-check showed only the intended help changes): `clifleet history` + `history.jsonl` (every non-dry-run upgrade / fetch / apply, one line per host × tool); `skills/clifleet/SKILL.md` + `TestSkillNamesOnlyRealCommandsAndFlags`; terminal-only "newer clifleet available" notice (`CLIFLEET_NO_UPDATE_CHECK=1` off); `scripts/release-check.sh`
+  - After v0.2.2, not tagged yet: `76b136a` LATEST column in `status` and fetch skip for tools already on the newest version (`internal/latest`, `internal/semver`); then a failed fetch drops the tool's old stamp so apply cannot open a partial download
   - Before that: Ctrl-C is reported as `interrupted`, not `unreachable`; the kill-tree KILL trusts only PID+start time (BusyBox without `lstart` KILLs only a direct child that is still the watchdog's sibling); npm aliases keep their real package name; a staged run hit by Ctrl-C sets a host error, so it never exits 0
 - `1cad8412` — squash-merge of **PR #4** (*Harden staged apply against mise shims, keychain rollbacks, and summary counts*)
 - Prior merges worth knowing:
@@ -87,32 +88,18 @@ These override generic “ask first” habits for **this** product:
 
 Host facts found 2026-10-30: mbp's proxy is set by `proxy_on` in `~/.zshrc`, which clifleet's remote scripts do not read (by rule), so mbp downloads go direct; Fan could add a proxy to that host's environment if he wants. omarchy's `~/.local/bin/codex` is a hand-written wrapper over `mise x codex` (aqua backend); `mise upgrade codex` there moved it 0.162.1 → 0.165.0 on 2026-10-30.
 
-## Fleet status (2026-10-29 22:37 JST, read-only)
+## Last fleet run (2026-10-30, v0.2.2 binary, Fan OKed)
 
-From `scripts/release-check.sh` (`status --json` + `upgrade --dry-run --json`, all four hosts reachable, exit 0; v0.2.1 and the new build printed the same). Newest seen: claude 2.1.312, codex 0.165.0, opencode 2.2.0, agent/cursor-agent 2026.10.22, pi 1.4.0.
+`upgrade --fetch` for all hosts, a `--fetch --hosts mbp --timeout 30m` retry, then `--apply`. The previous run's report is kept at `~/.cache/clifleet/last-report-20261029-1331.json` on the control machine.
 
-- **mac-studio, claw1:** five-pack current.
-- **mbp:** claude **2.1.296**, opencode **1.18.20** (brew); agent / cursor-agent version unreadable (`keychain locked`). Dry-run would stage claude, codex, agent, cursor-agent (release), opencode (brew), pi (npm).
-- **omarchy:** codex **0.162.1** at `~/.local/bin/codex`, classed `native` / `no-stage`, but its `--version` answers from mise (`codex@0.162.1` in `~/.config/mise/config.toml`), so it is still the mise install in the gaps table: fix on the host with `mise upgrade codex`. opencode **2.1.3** (native updater) and pi **1.3.0** are `no-stage` too; only `--one-shot` would move them. claude / agent / cursor-agent current.
-- Next real run, once Fan OKs timing: `clifleet upgrade --fetch --hosts mbp --only claude,opencode,pi --timeout 20m`, report, then `--apply`.
-
-## Last fleet run (2026-10-29 ~13:31 JST)
-
-Command shape: after PR #4 install,
-
-```bash
-set -o pipefail
-clifleet upgrade --fetch --only claude,codex,opencode,agent,cursor-agent
-clifleet upgrade --apply --only claude,codex,opencode,agent,cursor-agent
-```
-
-Rough outcome (see also `~/.cache/clifleet/last-report.json` on the control machine; that file is private and is not in this repo):
-
-- **Fetch:** ~8 staged / ~12 failed — many `timed out` on mac-studio / mbp / omarchy CDN paths; claw1 staged cleanly for the five-pack.
-- **Apply:** **0 applied** · 14 up to date · **3 failed** · 3 skipped (`nothing staged`)
-  - mac-studio + claw1 five-pack: already current
-  - **mbp:** claude / opencode / cursor-agent never staged (timeout / brew); **agent** failed extract and shows `keychain locked`
-  - **omarchy:** **codex** extract failed and `version_raw` shows mise; **opencode** npm apply failed (versions observed around 2.x)
+- **mac-studio:** opencode 2.2.0 → **2.2.1** applied; the rest up to date. kimi / qwen / dsh show `update available` but are `no-stage` (only `--one-shot` moves them).
+- **omarchy:** codex 0.162.1 → **0.165.0** by `mise upgrade codex` on the host (not by clifleet; the aqua backend already serves 0.165.0). opencode and pi are `update available` + `no-stage`.
+- **mbp:**
+  - claude still **2.1.296**: the 276 MB download timed out twice (191 MB in 30 min, direct link ~270 KB/s; the same file through mbp's proxy runs ~5 MB/s).
+  - opencode `blocked`: Homebrew says Xcode is too old.
+  - codex and agent apply failed with `could not extract`. Cause: a clifleet bug. A failed fetch left the 10-29 stamps pointing at files it had already deleted and partly re-downloaded. Fixed on main (`cf_unstage` at the start of every fetch, `TestFailedFetchDropsTheOldStamp`); nothing was swapped.
+  - agent / cursor-agent versions are unreadable (`keychain locked`).
+- **claw1:** openclaw `blocked` (needs Node ≥ 24.22.1, has v22.23.4); the rest up to date.
 
 PR #4 diagnostics that did help: `keychain locked` surfaces; mise shows in `version_raw` / `managed by mise`; failed footer can note host count; longer release fetch budget; brew update failure no longer blocks `brew fetch`.
 
@@ -123,7 +110,8 @@ PR #4 diagnostics that did help: `keychain locked` surfaces; mise shows in `vers
 | Host `timeout` 10m still cuts large Claude/Cursor CDN downloads on slow links | Product + config | Stale CLIs on mbp/omarchy; long runs exit 2 | Raise timeout for targeted refetch **or** per-tool budget / resume; ask Fan before another 40m+ run |
 | mbp Xcode / CLT vs Homebrew needing newer Xcode (seen as brew blocked) | Host | brew-channel tools (e.g. opencode) stuck | Fan upgrades Xcode on mbp |
 | mbp login keychain locked over SSH | Host | agent/`cursor-agent` version probe / some applies painful | Unlock keychain on mbp (or run apply from an unlocked GUI session) |
-| omarchy codex behind mise | Host / policy | clifleet correctly **refuses** to replace the mise binary | `mise upgrade codex` (or install a real standalone and stop using the shim) |
+| omarchy codex behind mise | Host / policy | clifleet correctly **refuses** to replace the mise binary | `mise upgrade codex` on the host (done 2026-10-30, 0.165.0) |
+| mbp downloads go direct (proxy only in `~/.zshrc`) | Host / product | Big release downloads (claude 276 MB) time out | Ask Fan: a per-host env option in `hosts.toml`, or a proxy in mbp's non-login environment |
 | claw1 openclaw Node engines too old | Host | fetch `blocked (needs Node …)` | Upgrade Node on claw1; clifleet will not bump Node |
 
 ## Safe command cheat sheet

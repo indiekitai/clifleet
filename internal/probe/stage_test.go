@@ -2270,3 +2270,126 @@ func TestClaudeApplyRefusesVoltaShim(t *testing.T) {
 		t.Fatalf("volta-shim changed: %q", body)
 	}
 }
+
+// A fetch that fails must not leave an earlier fetch's stamp behind: the
+// fetch already replaced that stamp's artifact, so apply would open a
+// partial download (seen on a real host as "could not extract").
+func TestFailedFetchDropsTheOldStamp(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	bin := filepath.Join(root, "bin")
+	cache := filepath.Join(root, "xdg")
+	if err := os.MkdirAll(bin, 0o755); err != nil || os.MkdirAll(home, 0o755) != nil {
+		t.Fatal(err)
+	}
+	body := filepath.Join(root, "codex-package.tgz")
+	writeTarGz(t, body, map[string]string{
+		"bin/codex":          "#!/bin/sh\nprintf 'codex-cli 1.2.3\\n'\n",
+		"codex-package.json": "{\"version\":\"1.2.3\",\"target\":\"x86_64-unknown-linux-musl\",\"entrypoint\":\"bin/codex\"}\n",
+	})
+	// The channel answers; the package download fails once CURL_FAIL is set,
+	// after leaving part of a file, as an interrupted transfer does.
+	writeExe(t, filepath.Join(bin, "curl"), `#!/bin/sh
+out=
+url=
+prev=
+for a in "$@"; do
+  if [ "$prev" = -o ]; then out=$a; fi
+  case $a in http*) url=$a ;; esac
+  prev=$a
+done
+case $url in
+  */channels/latest) printf '%s\n' '{"tag_name":"rust-v1.2.3"}' > "$out"; exit 0 ;;
+esac
+if [ -n "${CURL_FAIL:-}" ]; then
+  head -c 64 "$CURL_BODY" > "$out"
+  exit 28
+fi
+cp "$CURL_BODY" "$out"
+`)
+	writeExe(t, filepath.Join(bin, "npm"), "#!/bin/sh\nexit 1\n")
+	writeExe(t, filepath.Join(bin, "brew"), "#!/bin/sh\nexit 1\n")
+	standalone := filepath.Join(home, ".codex", "packages", "standalone")
+	oldRel := filepath.Join(standalone, "releases", "1.0.0-old")
+	if err := os.MkdirAll(filepath.Join(oldRel, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(oldRel, "bin", "codex"), "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n")
+	if err := os.Symlink(oldRel, filepath.Join(standalone, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(standalone, "current", "bin", "codex"), filepath.Join(bin, "codex")); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{
+		"PATH=" + bin + ":/usr/bin:/bin",
+		"HOME=" + home,
+		"XDG_CACHE_HOME=" + cache,
+		"CURL_BODY=" + body,
+	}
+	codex := StageStep{Tool: "codex", Kind: catalog.KindRelease, Release: "codex"}
+	fetch, err := FetchScript([]string{bin}, []StageStep{codex})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := filepath.Join(cache, "clifleet", "staged", "codex")
+	if res, err := ParseFetch(runSh(t, fetch, env)); err != nil || len(res) != 1 || res[0].Exit != 0 {
+		t.Fatalf("first fetch %+v %v", res, err)
+	}
+	if _, err := os.Stat(stamp); err != nil {
+		t.Fatalf("first fetch left no stamp: %v", err)
+	}
+
+	failEnv := append(append([]string{}, env...), "CURL_FAIL=1")
+	out := runSh(t, fetch, failEnv)
+	if res, err := ParseFetch(out); err != nil || len(res) != 1 || res[0].Exit == 0 {
+		t.Fatalf("failed fetch %+v %v\n%s", res, err, out)
+	}
+	if _, err := os.Stat(stamp); !os.IsNotExist(err) {
+		t.Fatalf("failed fetch kept the old stamp: %v", err)
+	}
+	apply, err := ApplyScript([]Tool{{Name: "codex", Binary: "codex"}}, []string{bin}, []StageStep{codex})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = runSh(t, apply, env)
+	applied, obs, err := ParseApply(out)
+	if err != nil || len(applied) != 1 || applied[0].Skip != "nothing staged" {
+		t.Fatalf("apply after failed fetch %+v %v\n%s", applied, err, out)
+	}
+	if ShortVersion(obs["codex"].Version) != "1.0.0" {
+		t.Fatalf("codex changed: %+v", obs["codex"])
+	}
+
+	// Every other fetch kind drops its stamp the same way.
+	others := []StageStep{
+		{Tool: "claude", Kind: catalog.KindRelease, Release: "claude"},
+		{Tool: "agent", Kind: catalog.KindRelease, Release: "agent"},
+		{Tool: "gemini", Kind: catalog.MethodNpm, Package: "@google/gemini-cli"},
+		{Tool: "opencode", Kind: catalog.MethodBrew, BrewKind: "formula", BrewToken: "opencode"},
+	}
+	for _, step := range others {
+		stamp := filepath.Join(cache, "clifleet", "staged", step.Tool)
+		for _, p := range []string{stamp, stamp + ".tmp"} {
+			if err := os.WriteFile(p, []byte("stale\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		script, err := FetchScript([]string{bin}, []StageStep{step})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := runSh(t, script, failEnv)
+		if res, err := ParseFetch(out); err != nil || len(res) != 1 || (res[0].Exit == 0 && res[0].Blocked == "") {
+			t.Fatalf("%s fetch %+v %v\n%s", step.Tool, res, err, out)
+		}
+		for _, p := range []string{stamp, stamp + ".tmp"} {
+			if _, err := os.Stat(p); !os.IsNotExist(err) {
+				t.Fatalf("%s: failed fetch kept %s: %v", step.Tool, p, err)
+			}
+		}
+	}
+}

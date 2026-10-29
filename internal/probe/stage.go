@@ -49,6 +49,13 @@ cache_root() {
   fi
 }
 
+# cf_unstage forgets what an earlier fetch staged for a tool. Every fetch
+# starts with it: the fetch replaces that tool's artifact, so a fetch that
+# fails now must not leave apply an old stamp pointing at a new partial file.
+cf_unstage() {
+  rm -f "$1/staged/$2" "$1/staged/$2.tmp"
+}
+
 cf_report() {
   detail=$(printf '%s' "$4" | tr '\t\r\n' '   ' | cut -c1-512)
   printf 'CF1\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$detail"
@@ -90,6 +97,7 @@ stage_npm() {
   tool=$1
   pkg=$2
   root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
+  cf_unstage "$root" "$tool"
   dest="$root/npm/$tool"
   cf_rmtree "$dest" || { cf_report fetch "$tool" 1 "could not reset cache"; return 0; }
   mkdir -p "$dest" "$root/staged" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
@@ -148,6 +156,8 @@ stage_brew() {
     cask|formula) ;;
     *) cf_report fetch "$tool" 1 "bad brew kind"; return 0 ;;
   esac
+  root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
+  cf_unstage "$root" "$tool"
   # A failed brew update must not skip the bottle. The tap on disk can
   # still serve brew fetch, and a later tool should see the same result.
   if [ "${cf_brew_update:-}" != ok ] && [ "${cf_brew_update:-}" != fail ]; then
@@ -181,7 +191,6 @@ stage_brew() {
     fi
     return 0
   fi
-  root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
   mkdir -p "$root/staged" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
   tmp="$root/staged/$tool.tmp"
   printf 'brew\t%s\t%s\n' "$bkind" "$token" > "$tmp" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }

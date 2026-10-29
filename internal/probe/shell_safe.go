@@ -913,8 +913,9 @@ cf_release_fetch() {
   base=$4
   os=$(uname -s)
   arch=$(uname -m)
+  root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
+  cf_unstage "$root" "$tool"
   if [ -z "$asset" ]; then
-    root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
     mkdir -p "$root/staged" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
     reason="no $id release asset for $os/$arch"
     printf 'release\t%s\tblocked\t%s\n' "$id" "$reason" > "$root/staged/$tool.tmp" || true
@@ -923,7 +924,6 @@ cf_release_fetch() {
     return 0
   fi
   url="$base/$asset"
-  root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
   dest="$root/release/$tool"
   cf_rmtree "$dest"
   mkdir -p "$dest" "$root/staged" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
@@ -945,12 +945,13 @@ cf_release_fetch() {
 
 stage_release_codex() {
   tool=$1
+  root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
+  cf_unstage "$root" "$tool"
   target=$(cf_codex_target) || {
     cf_report fetch "$tool" blocked "no Codex release for $(uname -s)/$(uname -m)"
     return 0
   }
   asset="codex-package-$target.tar.gz"
-  root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
   dest="$root/release/$tool"
   cf_rmtree "$dest"
   mkdir -p "$dest" "$root/staged" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
@@ -989,6 +990,7 @@ stage_release_codex() {
 stage_release_claude() {
   tool=$1
   root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
+  cf_unstage "$root" "$tool"
   dest="$root/release/$tool"
   cf_rmtree "$dest"
   mkdir -p "$dest" "$root/staged" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
@@ -1050,6 +1052,7 @@ stage_release_cursor_agent() {
 cf_stage_cursor_agent() {
   tool=$1
   root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
+  cf_unstage "$root" "$tool"
   dest="$root/release/$tool"
   cf_rmtree "$dest"
   mkdir -p "$dest" "$root/staged" || { cf_report fetch "$tool" 1 "mkdir failed"; return 0; }
