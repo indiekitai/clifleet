@@ -179,9 +179,15 @@ tool that is not already on PATH, or curl an installer. Commands run
 without a TTY (stdin is /dev/null) and with non-interactive brew and npm
 settings. The timeout is per tool for the default upgrade, --fetch, and
 --apply, so one slow download cannot fail the other tools on that host.
-The exit code is non-zero if any host cannot be reached or any upgrade
-command fails. A package whose engines do not match the host Node is
-blocked, not a failed apply.
+Release and Homebrew fetches use that budget when it is longer than the
+built-in cap. The exit code is non-zero if any host cannot be reached or
+any upgrade command fails. A package whose engines do not match the host
+Node is blocked, not a failed apply. A mise or asdf shim is left alone
+(managed by mise or asdf).
+
+The result is also written to $XDG_CACHE_HOME/clifleet/last-report.json
+(or ~/.cache/clifleet/last-report.json). With a pipe, use set -o pipefail
+so tee does not hide a failed upgrade.
 
 --dry-run still connects, so the printed command matches the install
 method on disk, but it does not run the upgrade.
@@ -389,6 +395,9 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 		fmt.Fprintf(stderr, "clifleet: %s\n", err)
 		return 1
 	}
+	if werr := writeLastReport(report); werr != nil {
+		fmt.Fprintf(stderr, "clifleet: could not write last report: %s\n", werr)
+	}
 	if jsonOut {
 		raw, jerr := report.JSON()
 		if jerr != nil {
@@ -426,6 +435,40 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 		return 2
 	}
 	return 0
+}
+
+// writeLastReport leaves the JSON report at
+// $XDG_CACHE_HOME/clifleet/last-report.json, or ~/.cache/clifleet when
+// XDG_CACHE_HOME is unset. A long run piped through tee can drop the table;
+// this file is still there when the process exits.
+func writeLastReport(report fleet.Report) error {
+	path, err := lastReportPath()
+	if err != nil {
+		return err
+	}
+	raw, err := report.JSON()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func lastReportPath() (string, error) {
+	if dir := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); dir != "" {
+		return filepath.Join(dir, "clifleet", "last-report.json"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", fmt.Errorf("no home directory for the report cache")
+	}
+	return filepath.Join(home, ".cache", "clifleet", "last-report.json"), nil
 }
 
 func reportHasNoStage(report fleet.Report) bool {

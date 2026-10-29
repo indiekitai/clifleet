@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/indiekitai/clifleet/internal/catalog"
 	"github.com/indiekitai/clifleet/internal/config"
 	"github.com/indiekitai/clifleet/internal/runner"
 )
@@ -562,6 +563,80 @@ tools = ["agy", "codex"]
 					t.Fatalf("agy %+v", row)
 				}
 			}
+		}
+	}
+}
+
+func TestNoteVersionKeepsInstallWhenProbeIsUnreadable(t *testing.T) {
+	row := Row{Tool: "opencode", Version: "1.0.0", Status: StApplied, Detail: "brew cache (formula opencode)"}
+	got := noteVersion(row, "1.0.0", catalog.Observation{
+		Present: true, Version: "version timed out", Path: "/opt/homebrew/bin/opencode",
+	}, StApplied)
+	if strings.Contains(got.Version, "version timed out") || got.Status != StApplied {
+		t.Fatalf("%+v", got)
+	}
+	if !strings.Contains(got.Detail, "version timed out") || got.Version != "1.0.0" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestSummaryCountsFailedToolRows(t *testing.T) {
+	oneHost := Report{
+		Command: "upgrade",
+		Phase:   PhaseFetch,
+		Hosts: []HostResult{{
+			Name: "box",
+			Rows: []Row{
+				{Tool: "codex", Status: StFailed, Failed: true},
+				{Tool: "claude", Status: StFailed, Failed: true},
+				{Tool: "opencode", Status: StFailed, Failed: true},
+				{Tool: "agy", Status: StStaged},
+			},
+		}},
+	}
+	if !strings.Contains(oneHost.Summary(), "3 failed (1 host)") || !strings.Contains(oneHost.Summary(), "1 staged") {
+		t.Fatal(oneHost.Summary())
+	}
+	two := Report{
+		Command: "upgrade",
+		Phase:   PhaseFetch,
+		Hosts: []HostResult{
+			{Name: "a", Rows: []Row{{Tool: "codex", Status: StFailed, Failed: true}}},
+			{Name: "b", Rows: []Row{{Tool: "claude", Status: StStaged}}},
+		},
+	}
+	if !strings.Contains(two.Summary(), "1 failed") || strings.Contains(two.Summary(), "(1 host)") {
+		t.Fatal(two.Summary())
+	}
+	if !strings.Contains(two.Summary(), "1 staged") {
+		t.Fatal(two.Summary())
+	}
+}
+
+func TestMiseShimIsNotStaged(t *testing.T) {
+	cfg := parseFleet(t, `
+[[hosts]]
+name = "omarchy"
+ssh = "omarchy"
+tools = ["codex"]
+`)
+	fake := &fakeRunner{probe: map[string]string{
+		"omarchy": probeOut(present("codex", "/home/a/.local/share/mise/shims/codex", "/usr/bin/mise", "0.99.0")),
+	}}
+	got, err := Upgrade(context.Background(), cfg, Options{Phase: PhaseFetch}, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Failed() {
+		t.Fatalf("managed by mise should not fail the run: %s", got.Summary())
+	}
+	row := got.Hosts[0].Rows[0]
+	if row.Status != StSkipped || !strings.Contains(row.Detail, "managed by mise") || row.Method != "mise" {
+		t.Fatalf("%+v", row)
+	}
+	for _, script := range fake.Scripts() {
+		if strings.Contains(script, "stage_release_codex") || strings.Contains(script, "clifleet-fetch/1") {
+			t.Fatalf("mise shim was staged:\n%s", script)
 		}
 	}
 }

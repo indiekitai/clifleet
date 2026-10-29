@@ -33,8 +33,17 @@ func TestProbeScriptIsReadOnly(t *testing.T) {
 	if strings.Contains(script, `. "$HOME/.nvm/nvm.sh" >/dev/null 2>&1 || true`) {
 		t.Fatal("nvm is sourced on the probe stdin")
 	}
-	if !strings.Contains(script, "cf_cap 3") || !strings.Contains(script, "cf_cap 5") || !strings.Contains(script, "clifleet-script/1") {
+	if !strings.Contains(script, "cf_cap_both 15") || !strings.Contains(script, "cf_cap 5") || !strings.Contains(script, "clifleet-script/1") {
 		t.Fatal("probe caps or script marker missing")
+	}
+	if strings.Contains(script, "cf_cap 3") {
+		t.Fatal("version probe is still capped at 3s")
+	}
+	if strings.Contains(script, `prepend "$HOME/.local/share/mise/shims"`) {
+		t.Fatal("mise shims are prepended ahead of real binaries")
+	}
+	if !strings.Contains(script, `append_missing "$HOME/.local/share/mise/shims"`) {
+		t.Fatal("mise shims are not on PATH at all")
 	}
 }
 
@@ -189,7 +198,7 @@ func TestVersionCapDoesNotBlockTheHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("probe failed: %v\n%s", err, out)
 	}
-	if time.Since(start) > 12*time.Second {
+	if time.Since(start) > 22*time.Second {
 		t.Fatalf("version cap took %s", time.Since(start))
 	}
 	obs, err := ParseProbe(string(out))
@@ -328,6 +337,39 @@ func TestLoginPathSurvivesNvmAndBrewShellenv(t *testing.T) {
 	}
 	if !obs["claude"].Present || ShortVersion(obs["claude"].Version) != "9.9.9" {
 		t.Fatalf("brew shellenv was not applied: %+v\n%s", obs["claude"], out)
+	}
+}
+
+func TestBrewListVersionWhenBinaryPrintsNothing(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	cellar := filepath.Join(root, "Cellar", "opencode", "1.2.3", "bin")
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(cellar, 0o755); err != nil || os.MkdirAll(bin, 0o755) != nil || os.MkdirAll(home, 0o755) != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(cellar, "opencode"), "#!/bin/sh\nexit 1\n")
+	writeExe(t, filepath.Join(bin, "brew"), "#!/bin/sh\nif [ \"$1\" = list ]; then printf 'opencode 1.2.3\\n'; exit 0; fi\nexit 1\n")
+	script, err := ProbeScript([]Tool{{Name: "opencode", Binary: "opencode"}}, []string{cellar, bin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-s")
+	cmd.Stdin = strings.NewReader(script)
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + home}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("probe failed: %v\n%s", err, out)
+	}
+	obs, err := ParseProbe(string(out))
+	if err != nil {
+		t.Fatalf("parse: %v\n%s", err, out)
+	}
+	if ShortVersion(obs["opencode"].Version) != "1.2.3" {
+		t.Fatalf("brew list version was not used: %+v\n%s", obs["opencode"], out)
 	}
 }
 

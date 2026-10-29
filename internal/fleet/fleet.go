@@ -131,11 +131,12 @@ func (r Report) Summary() string {
 	if r.DryRun && r.Command == "status" {
 		return fmt.Sprintf("dry-run · %d %s · no connections opened", hosts, hostWord)
 	}
-	var installed, missing, upgraded, current, skipped, would, failed int
+	var installed, missing, upgraded, current, skipped, would, failedTools, failedHosts int
 	var staged, nostage, applied, blocked int
 	seenFail := map[string]bool{}
 	for _, h := range r.Hosts {
 		hostFailed := h.Error != ""
+		toolFails := 0
 		for _, row := range h.Rows {
 			switch row.Status {
 			case StInstalled:
@@ -160,40 +161,60 @@ func (r Report) Summary() string {
 				blocked++
 			}
 			if row.Failed || row.Status == StUnreachable || row.Status == StFailed {
+				toolFails++
 				hostFailed = true
 			}
 		}
+		failedTools += toolFails
 		if hostFailed && !seenFail[h.Name] {
 			seenFail[h.Name] = true
-			failed++
+			failedHosts++
+			if toolFails == 0 {
+				failedTools++
+			}
 		}
 	}
+	failed := failedPhrase(failedTools, failedHosts)
 	if r.Phase == PhaseFetch && r.DryRun {
-		return fmt.Sprintf("dry-run · %d %s · %d would stage · %d blocked · %d no-stage · %d skipped · %d failed",
+		return fmt.Sprintf("dry-run · %d %s · %d would stage · %d blocked · %d no-stage · %d skipped · %s",
 			hosts, hostWord, would, blocked, nostage, skipped+missing, failed)
 	}
 	if r.Phase == PhaseFetch {
-		return fmt.Sprintf("%d %s · %d staged · %d blocked · %d no-stage · %d skipped · %d failed",
+		return fmt.Sprintf("%d %s · %d staged · %d blocked · %d no-stage · %d skipped · %s",
 			hosts, hostWord, staged, blocked, nostage, skipped+missing, failed)
 	}
 	if r.Phase == PhaseApply && r.DryRun {
-		return fmt.Sprintf("dry-run · %d %s · %d would apply · %d blocked · %d no-stage · %d skipped · %d failed",
+		return fmt.Sprintf("dry-run · %d %s · %d would apply · %d blocked · %d no-stage · %d skipped · %s",
 			hosts, hostWord, would, blocked, nostage, skipped+missing, failed)
 	}
 	if r.Phase == PhaseApply {
-		return fmt.Sprintf("%d %s · %d applied · %d up to date · %d blocked · %d no-stage · %d skipped · %d failed",
+		return fmt.Sprintf("%d %s · %d applied · %d up to date · %d blocked · %d no-stage · %d skipped · %s",
 			hosts, hostWord, applied, current, blocked, nostage, skipped+missing, failed)
 	}
 	if r.Command == "upgrade" && r.DryRun {
-		return fmt.Sprintf("dry-run · %d %s · %d would upgrade · %d no-stage · %d blocked · %d skipped · %d failed",
+		return fmt.Sprintf("dry-run · %d %s · %d would upgrade · %d no-stage · %d blocked · %d skipped · %s",
 			hosts, hostWord, would, nostage, blocked, skipped+missing, failed)
 	}
 	if r.Command == "upgrade" {
-		return fmt.Sprintf("%d %s · %d upgraded · %d up to date · %d no-stage · %d blocked · %d skipped · %d failed",
+		return fmt.Sprintf("%d %s · %d upgraded · %d up to date · %d no-stage · %d blocked · %d skipped · %s",
 			hosts, hostWord, upgraded+applied, current, nostage, blocked, skipped+missing, failed)
 	}
-	return fmt.Sprintf("%d %s · %d installed · %d not installed · %d failed",
+	return fmt.Sprintf("%d %s · %d installed · %d not installed · %s",
 		hosts, hostWord, installed, missing, failed)
+}
+
+// failedPhrase counts tool rows. When that number and the number of hosts
+// with a failure differ, the host count is printed too so "1 failed" is not
+// read as one host that had several tool failures.
+func failedPhrase(tools, hosts int) string {
+	if hosts > 0 && tools != hosts {
+		word := "hosts"
+		if hosts == 1 {
+			word = "host"
+		}
+		return fmt.Sprintf("%d failed (%d %s)", tools, hosts, word)
+	}
+	return fmt.Sprintf("%d failed", tools)
 }
 
 // JSON renders the report for --json.
@@ -482,6 +503,19 @@ func noteVersion(row Row, before string, next catalog.Observation, changed strin
 		row.Status = changed
 		return row
 	}
+	if unreadableVersion(next.Version) {
+		row.Status = changed
+		if next.Path != "" {
+			row.Path = next.Path
+		}
+		note := strings.TrimSpace(next.Version)
+		if row.Detail == "" {
+			row.Detail = note
+		} else if !strings.Contains(row.Detail, note) {
+			row.Detail = row.Detail + "; " + note
+		}
+		return row
+	}
 	afterV := probe.ShortVersion(next.Version)
 	if afterV == "" {
 		afterV = "unknown"
@@ -497,6 +531,11 @@ func noteVersion(row Row, before string, next catalog.Observation, changed strin
 	row.Status = changed
 	row.Version = before + " → " + afterV
 	return row
+}
+
+func unreadableVersion(raw string) bool {
+	v := strings.TrimSpace(raw)
+	return v == "version timed out" || v == "keychain locked"
 }
 
 func presentRow(name string, p plan, status, detail string, failed bool) Row {

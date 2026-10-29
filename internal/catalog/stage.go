@@ -57,6 +57,9 @@ func PlanStage(spec Spec, obs Observation, methodOverride string) StagePlan {
 	if !obs.Present {
 		return StagePlan{Action: ActionSkip, Reason: "not installed"}
 	}
+	if name, ok := ManagedBy(obs); ok {
+		return StagePlan{Method: name, Action: ActionSkip, Reason: "managed by " + name}
+	}
 	method := Classify(obs)
 	if methodOverride != "" {
 		method = methodOverride

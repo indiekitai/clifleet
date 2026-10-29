@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/indiekitai/clifleet/internal/catalog"
 	"github.com/indiekitai/clifleet/internal/shellquote"
@@ -61,6 +62,26 @@ cf_safe_token() {
     [A-Za-z0-9]*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# cf_brew_block_reason prints a short reason when Homebrew failed because
+# Xcode or the Command Line Tools are too old. Empty means some other failure.
+cf_brew_block_reason() {
+  file=$1
+  [ -f "$file" ] || return 1
+  if grep -i 'command line tools' "$file" 2>/dev/null | grep -i outdated >/dev/null 2>&1 || grep -i 'command line tools' "$file" 2>/dev/null | grep -i 'too old' >/dev/null 2>&1; then
+    printf '%s\n' 'Command Line Tools are too old for Homebrew'
+    return 0
+  fi
+  if grep -i xcode "$file" 2>/dev/null | grep -i outdated >/dev/null 2>&1 || grep -i xcode "$file" 2>/dev/null | grep -i 'too old' >/dev/null 2>&1; then
+    printf '%s\n' 'Xcode is too old for Homebrew'
+    return 0
+  fi
+  if grep -i 'xcode-select --install' "$file" >/dev/null 2>&1; then
+    printf '%s\n' 'Homebrew needs Xcode Command Line Tools (xcode-select --install)'
+    return 0
+  fi
+  return 1
 }
 `
 
@@ -127,30 +148,37 @@ stage_brew() {
     cask|formula) ;;
     *) cf_report fetch "$tool" 1 "bad brew kind"; return 0 ;;
   esac
-  if [ "${cf_brew_update:-}" != ok ]; then
-    if [ "${cf_brew_update:-}" = fail ]; then
-      cf_report fetch "$tool" 1 "brew update failed"
-      return 0
-    fi
-    if brew update </dev/null >&2; then
+  # A failed brew update must not skip the bottle. The tap on disk can
+  # still serve brew fetch, and a later tool should see the same result.
+  if [ "${cf_brew_update:-}" != ok ] && [ "${cf_brew_update:-}" != fail ]; then
+    if brew update >"$cf_dir/brew-update.log" 2>&1 </dev/null; then
       cf_brew_update=ok
-      # The tap is current. Later brew commands in this fetch must not
-      # update again, and must not upgrade an installed formula.
-      export HOMEBREW_NO_AUTO_UPDATE=1
     else
       cf_brew_update=fail
-      cf_report fetch "$tool" 1 "brew update failed"
-      return 0
     fi
+    export HOMEBREW_NO_AUTO_UPDATE=1
   fi
   rc=0
+  blog=$cf_dir/brew-$tool.log
   if [ "$bkind" = cask ]; then
-    brew fetch --cask "$token" </dev/null >&2 || rc=$?
+    brew fetch --cask "$token" >"$blog" 2>&1 </dev/null || rc=$?
   else
-    brew fetch --formula "$token" </dev/null >&2 || rc=$?
+    brew fetch --formula "$token" >"$blog" 2>&1 </dev/null || rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
-    cf_report fetch "$tool" "$rc" "brew fetch failed"
+    reason=$(cf_brew_block_reason "$blog" || true)
+    if [ -z "$reason" ]; then
+      reason=$(cf_brew_block_reason "$cf_dir/brew-update.log" || true)
+    fi
+    if [ -n "$reason" ]; then
+      cf_report fetch "$tool" blocked "$reason"
+      return 0
+    fi
+    if [ "${cf_brew_update:-}" = fail ]; then
+      cf_report fetch "$tool" "$rc" "brew update failed; brew fetch failed"
+    else
+      cf_report fetch "$tool" "$rc" "brew fetch failed"
+    fi
     return 0
   fi
   root=$(cache_root) || { cf_report fetch "$tool" 1 "no home for cache"; return 0; }
@@ -158,7 +186,11 @@ stage_brew() {
   tmp="$root/staged/$tool.tmp"
   printf 'brew\t%s\t%s\n' "$bkind" "$token" > "$tmp" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
   mv -f "$tmp" "$root/staged/$tool" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
-  cf_report fetch "$tool" 0 "brew cache ($bkind $token)"
+  detail="brew cache ($bkind $token)"
+  if [ "${cf_brew_update:-}" = fail ]; then
+    detail="$detail; brew update failed, used the existing tap"
+  fi
+  cf_report fetch "$tool" 0 "$detail"
 }
 `
 
@@ -231,12 +263,18 @@ apply_brew() {
   esac
   cf_safe_token "$token" || { cf_report apply "$tool" 1 "refusing unsafe brew token"; return 0; }
   rc=0
+  blog=$cf_dir/brew-apply-$tool.log
   if [ "$bkind" = cask ]; then
-    brew upgrade --cask "$token" </dev/null >&2 || rc=$?
+    brew upgrade --cask "$token" >"$blog" 2>&1 </dev/null || rc=$?
   else
-    brew upgrade "$token" </dev/null >&2 || rc=$?
+    brew upgrade "$token" >"$blog" 2>&1 </dev/null || rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
+    reason=$(cf_brew_block_reason "$blog" || true)
+    if [ -n "$reason" ]; then
+      cf_report apply "$tool" blocked "$reason"
+      return 0
+    fi
     cf_report apply "$tool" "$rc" "brew upgrade failed"
     return 0
   fi
@@ -247,6 +285,13 @@ apply_brew() {
 // FetchScript downloads staged artifacts. It does not install or replace
 // a live binary.
 func FetchScript(extraPaths []string, steps []StageStep) (string, error) {
+	return FetchScriptBudget(extraPaths, steps, 0)
+}
+
+// FetchScriptBudget is FetchScript with the per-tool host budget. Release
+// and Homebrew downloads may use that budget instead of a fixed 180s cap.
+// A zero budget keeps the built-in defaults.
+func FetchScriptBudget(extraPaths []string, steps []StageStep, toolTimeout time.Duration) (string, error) {
 	if len(steps) == 0 {
 		return "", fmt.Errorf("no stage commands")
 	}
@@ -274,18 +319,21 @@ printf '%s\n' 'clifleet-fetch/1'
 	if fetchHasBrew(steps) {
 		// One brew update for the script, in this shell. Each stage_brew then
 		// runs under cf_limit, which is a subshell and would not see an update
-		// performed inside another tool.
+		// performed inside another tool. A failed or capped update does not
+		// skip fetch: the bottles already on disk may still install.
 		b.WriteString(`if command -v brew >/dev/null 2>&1; then
-  if brew update </dev/null >&2; then
+  rc=0
+  cf_limit 90 brew update >"$cf_dir/brew-update.log" 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
     cf_brew_update=ok
-    export HOMEBREW_NO_AUTO_UPDATE=1
   else
     cf_brew_update=fail
   fi
+  export HOMEBREW_NO_AUTO_UPDATE=1
 fi
 `)
 	}
-	if err := writeStageCalls(&b, steps, true); err != nil {
+	if err := writeStageCalls(&b, steps, true, toolTimeout); err != nil {
 		return "", err
 	}
 	b.WriteString("exit 0\n")
@@ -296,6 +344,12 @@ fi
 // The install command is the short part: a local npm tarball, or brew
 // upgrade with auto-update left off.
 func ApplyScript(reprobe []Tool, extraPaths []string, steps []StageStep) (string, error) {
+	return ApplyScriptBudget(reprobe, extraPaths, steps, 0)
+}
+
+// ApplyScriptBudget is ApplyScript with the per-tool host budget. Apply
+// stays a short swap; the budget only shrinks a cap that would outlive it.
+func ApplyScriptBudget(reprobe []Tool, extraPaths []string, steps []StageStep, toolTimeout time.Duration) (string, error) {
 	if len(steps) == 0 {
 		return "", fmt.Errorf("no stage commands")
 	}
@@ -317,7 +371,7 @@ export npm_config_audit=false
 export npm_config_update_notifier=false
 printf '%s\n' 'clifleet-apply/1'
 `)
-	if err := writeStageCalls(&b, steps, false); err != nil {
+	if err := writeStageCalls(&b, steps, false, toolTimeout); err != nil {
 		return "", err
 	}
 	b.WriteString("printf '%s\\n' 'clifleet-probe/1'\n")
@@ -328,7 +382,7 @@ printf '%s\n' 'clifleet-apply/1'
 	return b.String(), nil
 }
 
-func writeStageCalls(b *strings.Builder, steps []StageStep, fetch bool) error {
+func writeStageCalls(b *strings.Builder, steps []StageStep, fetch bool, toolTimeout time.Duration) error {
 	seen := map[string]struct{}{}
 	for _, step := range steps {
 		if err := validStageStep(step); err != nil {
@@ -361,13 +415,11 @@ func writeStageCalls(b *strings.Builder, steps []StageStep, fetch bool) error {
 		default:
 			return fmt.Errorf("unknown stage kind %q", step.Kind)
 		}
-		writeLimited(b, fetch, step.Kind, step.Tool, call)
+		writeLimited(b, fetch, step.Kind, step.Tool, call, toolTimeout)
 	}
 	return nil
 }
 
-// writeLimited caps one stage or apply so a slow brew fetch cannot hold the
-// rest of the host script. npm is 120s. brew and release downloads are 180s.
 func fetchHasBrew(steps []StageStep) bool {
 	for _, step := range steps {
 		if step.Kind == catalog.MethodBrew {
@@ -377,17 +429,61 @@ func fetchHasBrew(steps []StageStep) bool {
 	return false
 }
 
-func writeLimited(b *strings.Builder, fetch bool, kind, tool, call string) {
-	secs := "120"
-	if kind == catalog.MethodBrew || (fetch && kind == catalog.KindRelease) {
-		secs = "180"
-	}
+// writeLimited caps one stage or apply so a slow download cannot hold the
+// rest of the host script. npm pack stays at 120s. Homebrew and release
+// fetches grow with the per-tool host budget when that budget is longer
+// than the default, and they stay inside it so the script can still report
+// a timeout. Apply stays a short local swap.
+func writeLimited(b *strings.Builder, fetch bool, kind, tool, call string, toolTimeout time.Duration) {
+	secs := limitSeconds(fetch, kind, toolTimeout)
 	tag := "apply"
 	if fetch {
 		tag = "fetch"
 	}
-	fmt.Fprintf(b, "rc=0\ncf_limit %s %s || rc=$?\n", secs, call)
+	fmt.Fprintf(b, "rc=0\ncf_limit %d %s || rc=$?\n", secs, call)
 	fmt.Fprintf(b, "if [ \"$rc\" -eq 124 ]; then\n  cf_report %s %s 124 'timed out'\nfi\n", tag, shellquote.Quote(tool))
+}
+
+// limitSeconds is the per-tool script cap. A zero toolTimeout uses the
+// defaults (npm 120s, brew fetch 180s, release fetch 480s, apply 180s).
+// When the host budget is longer, release and brew fetches may use it,
+// minus 20s so the script can print a CF1 line before SSH kills it.
+func limitSeconds(fetch bool, kind string, toolTimeout time.Duration) int {
+	npm, brew, release, apply := 120, 180, 480, 180
+	avail := 0
+	if toolTimeout > 0 {
+		avail = int(toolTimeout.Seconds()) - 20
+		if avail < 45 {
+			avail = 45
+		}
+	}
+	if !fetch {
+		secs := apply
+		if kind == catalog.MethodBrew {
+			secs = brew
+		}
+		if avail > 0 && secs > avail {
+			secs = avail
+		}
+		return secs
+	}
+	secs := npm
+	switch kind {
+	case catalog.MethodBrew:
+		secs = brew
+		if avail > secs {
+			secs = avail
+		}
+	case catalog.KindRelease:
+		secs = release
+		if avail > secs {
+			secs = avail
+		}
+	}
+	if avail > 0 && secs > avail {
+		return avail
+	}
+	return secs
 }
 
 func validStageStep(step StageStep) error {
