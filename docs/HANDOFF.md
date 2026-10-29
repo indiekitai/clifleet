@@ -97,11 +97,9 @@ Host facts found 2026-10-30: mbp's proxy is set by `proxy_on` in `~/.zshrc`, whi
 - **mbp:**
   - claude still **2.1.296**: the 276 MB download timed out twice (191 MB in 30 min, direct link ~270 KB/s; the same file through mbp's proxy runs ~5 MB/s).
   - opencode `blocked`: Homebrew says Xcode is too old.
-  - codex and agent apply failed with `could not extract`. Cause: a clifleet bug. A failed fetch left the 10-29 stamps pointing at files it had already deleted and partly re-downloaded. Fixed on main (`cf_unstage` at the start of every fetch, `TestFailedFetchDropsTheOldStamp`); nothing was swapped.
+  - codex and agent apply failed with `could not extract`. Cause: a clifleet bug. A failed fetch left the 10-29 stamps pointing at files it had already deleted and partly re-downloaded. Fixed on main (`cf_unstage` at the start of every fetch, `TestFailedFetchDropsTheOldStamp`); nothing was swapped. The two stale stamps (`~/.cache/clifleet/staged/codex`, `staged/agent`) are **still on mbp**, and the v0.2.2 binary still writes the old scripts, so `--apply --hosts mbp` repeats the error until a fetch from a fixed binary rewrites or removes them (or they are deleted by hand).
   - agent / cursor-agent versions are unreadable (`keychain locked`).
 - **claw1:** openclaw `blocked` (needs Node ≥ 24.22.1, has v22.23.4); the rest up to date.
-
-PR #4 diagnostics that did help: `keychain locked` surfaces; mise shows in `version_raw` / `managed by mise`; failed footer can note host count; longer release fetch budget; brew update failure no longer blocks `brew fetch`.
 
 ## Open gaps (product vs host)
 
