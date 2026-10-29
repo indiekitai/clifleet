@@ -381,8 +381,10 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	notice := func() string { return "" }
 	var progress func(string)
 	if isTerm(stderr) && !jsonOut {
+		notice = startUpdateNotice(ctx)
 		var mu sync.Mutex
 		progress = func(line string) {
 			mu.Lock()
@@ -443,6 +445,9 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 			}
 			fmt.Fprintf(stderr, "\n# %s\n%s\n", h.Name, strings.TrimSpace(h.Log))
 		}
+	}
+	if n := notice(); n != "" {
+		fmt.Fprintln(stderr, n)
 	}
 	if report.Failed() {
 		return 2
