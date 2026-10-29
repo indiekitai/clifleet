@@ -114,9 +114,16 @@ cf_kill_tree() {
       fi
       ;;
     *)
-      # No start times (BusyBox ps) or no ps at all: a PID alone cannot be
-      # trusted a second later, so only the direct child gets the KILL.
-      if kill -0 "$1" 2>/dev/null; then
+      # No start times (BusyBox ps) or no ps at all: only the direct child
+      # gets the KILL, and only while it is still a sibling of this watchdog.
+      # Once the caller reaps it, its PID can go to anyone; the caller forks
+      # nothing while it waits for the watchdog, so a sibling is still ours.
+      cf_kt_me=$(exec sh -c 'echo $PPID')
+      cf_kt_same=$({ ps -A -o pid= -o ppid= 2>/dev/null || ps -o pid= -o ppid= 2>/dev/null; } | awk -v me="$cf_kt_me" -v kid="$1" '
+        $1 == me { a = $2 }
+        $1 == kid { b = $2 }
+        END { if (a != "" && a == b) print "yes" }')
+      if [ "$cf_kt_same" = yes ]; then
         kill -9 "$1" 2>/dev/null || true
       fi
       ;;

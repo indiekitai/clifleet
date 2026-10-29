@@ -484,9 +484,14 @@ case $(cf_tree "$other:*") in
   *) echo tree-missed ;;
 esac
 kill -9 "$other"
+# BusyBox ps has no start times: a direct child that ignores TERM still gets the KILL.
+ps() { command ps -A -o pid= -o ppid=; }
+cf_cap 1 "$cf_dir/out" sh -c "trap '' TERM; exec sleep 317"
+printf 'rc=%s\n' "$?"
+unset -f ps
 `
 	out := runSh(t, body, []string{"PATH=/usr/bin:/bin", "HOME=" + root})
-	if strings.Count(out, "rc=124") != 3 || strings.Contains(out, "orphan") || strings.Count(out, "gone") != 3 ||
+	if strings.Count(out, "rc=124") != 4 || strings.Contains(out, "orphan") || strings.Count(out, "gone") != 3 ||
 		!strings.Contains(out, "identity-ok") || !strings.Contains(out, "tree-ok") {
 		t.Fatalf("cap left a child running:\n%s", out)
 	}
@@ -605,11 +610,21 @@ ps() {
 cf_kill_tree "$r"
 sleep 1
 if kill -0 "$x" 2>/dev/null; then echo spared; else echo killed; fi
+# The capped command was reaped and its PID went to x, which is not a
+# sibling of the watchdog: a bare PID is not enough for the KILL.
+(
+  w=$(exec sh -c 'echo $PPID')
+  ps() {
+    printf '%s %s\n' "$w" "$$" "$x" 1
+  }
+  cf_kill_tree "$x"
+)
+if kill -0 "$x" 2>/dev/null; then echo spared; else echo killed; fi
 kill -9 "$x" 2>/dev/null
 wait 2>/dev/null
 `
 	out := runSh(t, body, []string{"PATH=/usr/bin:/bin", "HOME=" + root})
-	if strings.Count(out, "spared") != 2 {
+	if strings.Count(out, "spared") != 3 {
 		t.Fatalf("KILL reached a process that only reused a PID:\n%s", out)
 	}
 }

@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -15,8 +16,9 @@ func finishStage(ctx context.Context, result HostResult, target runner.Target, r
 	var actions map[string]probe.ActionResult
 	var after map[string]catalog.Observation
 	if !opt.DryRun && len(staged) > 0 {
-		var log string
-		actions, after, log = runStageSteps(ctx, target, run, opt, phase, tools, extra, staged)
+		var log, stopped string
+		actions, after, log, stopped = runStageSteps(ctx, target, run, opt, phase, tools, extra, staged)
+		result.Error = stopped
 		if opt.Verbose {
 			result.Log = strings.TrimSpace(log)
 		}
@@ -40,8 +42,9 @@ func finishSafe(ctx context.Context, result HostResult, target runner.Target, ru
 	var fetched, applied map[string]probe.ActionResult
 	var after map[string]catalog.Observation
 	if !opt.DryRun && len(staged) > 0 {
-		var fetchLog, applyLog string
-		fetched, _, fetchLog = runStageSteps(ctx, target, run, opt, PhaseFetch, tools, extra, staged)
+		var fetchLog, applyLog, stopped string
+		fetched, _, fetchLog, stopped = runStageSteps(ctx, target, run, opt, PhaseFetch, tools, extra, staged)
+		result.Error = stopped
 		var applySteps []probe.StageStep
 		for _, step := range staged {
 			res, ok := fetched[step.Tool]
@@ -51,7 +54,10 @@ func finishSafe(ctx context.Context, result HostResult, target runner.Target, ru
 			applySteps = append(applySteps, step)
 		}
 		if len(applySteps) > 0 {
-			applied, after, applyLog = runStageSteps(ctx, target, run, opt, PhaseApply, tools, extra, applySteps)
+			applied, after, applyLog, stopped = runStageSteps(ctx, target, run, opt, PhaseApply, tools, extra, applySteps)
+			if result.Error == "" {
+				result.Error = stopped
+			}
 		}
 		if opt.Verbose {
 			result.Log = strings.TrimSpace(fetchLog + "\n" + applyLog)
@@ -69,14 +75,19 @@ func finishSafe(ctx context.Context, result HostResult, target runner.Target, ru
 }
 
 // runStageSteps runs one fetch or apply script per tool. A timeout or a
-// non-zero status stays on that tool.
-func runStageSteps(ctx context.Context, target runner.Target, run runner.Runner, opt Options, phase string, tools []probe.Tool, extra []string, steps []probe.StageStep) (map[string]probe.ActionResult, map[string]catalog.Observation, string) {
-	actions := map[string]probe.ActionResult{}
-	after := map[string]catalog.Observation{}
+// non-zero status stays on that tool. An interrupt also comes back as
+// stopped, so a run cut short by Ctrl-C never reports success, even when
+// every tool it reached had already printed its result.
+func runStageSteps(ctx context.Context, target runner.Target, run runner.Runner, opt Options, phase string, tools []probe.Tool, extra []string, steps []probe.StageStep) (actions map[string]probe.ActionResult, after map[string]catalog.Observation, log, stopped string) {
+	actions = map[string]probe.ActionResult{}
+	after = map[string]catalog.Observation{}
 	var logs []string
 	for _, step := range steps {
 		if ctx.Err() != nil {
 			actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: ctx.Err().Error()}
+			if stopped == "" {
+				stopped = runner.ErrInterrupted.Error()
+			}
 			continue
 		}
 		reprobe := reprobeFor(tools, step)
@@ -90,6 +101,9 @@ func runStageSteps(ctx context.Context, target runner.Target, run runner.Runner,
 			logs = append(logs, stderr)
 		}
 		if err != nil {
+			if errors.Is(err, runner.ErrInterrupted) && stopped == "" {
+				stopped = err.Error()
+			}
 			// A host timeout still returns whatever CF1 lines were printed.
 			// A tool that already reported its result is not failed with its siblings.
 			if res, ok := partialAction(phase, out, step.Tool); ok {
@@ -114,7 +128,7 @@ func runStageSteps(ctx context.Context, target runner.Target, run runner.Runner,
 			after[k] = v
 		}
 	}
-	return actions, after, strings.Join(logs, "\n")
+	return actions, after, strings.Join(logs, "\n"), stopped
 }
 
 func reprobeFor(tools []probe.Tool, step probe.StageStep) []probe.Tool {

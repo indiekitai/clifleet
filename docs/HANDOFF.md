@@ -30,7 +30,7 @@ Checked against `origin/main` on 2026-10-29 (Asia/Tokyo). Tip SHA, PR #2–#4 su
   - `1bce61c` orchestration: ssh `--` and dash-destination rejection, duplicate-host rejection, doctor deadline, short-budget caps, partial-output salvage for apply / one-shot
   - `2d1be27` shell: whole-process-tree kill on caps, stalled-download cutoff, mawk-safe checksum, tab/newline paths, npm bin-link rollback
   - `4ea23b5` catalog: Volta and mise/asdf `installs/` are managed, whole-segment npm package match, custom `native` recipes are not staged
-  - Then: Ctrl-C is reported as `interrupted`, not `unreachable`; the kill-tree KILL trusts only PID+start time (BusyBox without `lstart` falls back to the direct child); npm aliases keep their real package name
+  - Then: Ctrl-C is reported as `interrupted`, not `unreachable`; the kill-tree KILL trusts only PID+start time (BusyBox without `lstart` KILLs only a direct child that is still the watchdog's sibling); npm aliases keep their real package name; a staged run hit by Ctrl-C sets a host error, so it never exits 0
 - `1cad8412` — squash-merge of **PR #4** (*Harden staged apply against mise shims, keychain rollbacks, and summary counts*)
 - Prior merges worth knowing:
   - **PR #3** `b35f40c8` — staged upgrade is the default path (npm atomic temp-prefix apply, brew PATH / `shellenv`, native stage budget, engines preflight)

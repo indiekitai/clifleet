@@ -790,6 +790,31 @@ tools = ["codex", "opencode"]
 	}
 }
 
+func TestInterruptedApplyIsNotSuccess(t *testing.T) {
+	cfg := parseFleet(t, "[[hosts]]\nname = \"box\"\nssh = \"box\"\ntools = [\"codex\"]\n")
+	probe := probeOut(withPkg(present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "0.1.0"), "@openai/codex"))
+	for _, phase := range []string{PhaseApply, PhaseUpgrade} {
+		fake := scriptRunner(func(script string) (string, string, error) {
+			switch {
+			case strings.Contains(script, "apply_npm 'codex'"):
+				// The swap was reported; Ctrl-C landed during the re-probe.
+				return "clifleet-apply/1\n" + actionLine("apply", "codex", "0", "swapped") + "\n", "", fmt.Errorf("%w; the remote step had started", runner.ErrInterrupted)
+			case strings.Contains(script, "clifleet-fetch/1"):
+				return "clifleet-fetch/1\n" + actionLine("fetch", "codex", "0", "staged") + "\n", "", nil
+			}
+			return probe, "", nil
+		})
+		got, err := Upgrade(context.Background(), cfg, Options{Phase: phase}, fake)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := got.Hosts[0]
+		if h.Rows[0].Status != StApplied || !strings.Contains(h.Error, "interrupted") || !got.Failed() {
+			t.Fatalf("%s: an interrupted run must not report success: error=%q rows=%+v", phase, h.Error, h.Rows)
+		}
+	}
+}
+
 func TestOneShotHostErrorKeepsFinishedRows(t *testing.T) {
 	cfg := parseFleet(t, `
 [[hosts]]
