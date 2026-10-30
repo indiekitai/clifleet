@@ -36,6 +36,7 @@ Checked against `origin/main` on 2026-10-29 (Asia/Tokyo). Tip SHA, PR #2–#4 su
   - Tag **`v0.2.2`** (2026-10-30, release green, release-check showed only the intended help changes): `clifleet history` + `history.jsonl` (every non-dry-run upgrade / fetch / apply, one line per host × tool); `skills/clifleet/SKILL.md` + `TestSkillNamesOnlyRealCommandsAndFlags`; terminal-only "newer clifleet available" notice (`CLIFLEET_NO_UPDATE_CHECK=1` off); `scripts/release-check.sh`
   - Tag **`v0.2.3`** (2026-10-30, release-check showed only the intended LATEST / help changes): `76b136a` LATEST column in `status` and fetch skip for tools already on the newest version (`internal/latest`, `internal/semver`); then a failed fetch drops the tool's old stamp so apply cannot open a partial download
   - Tag **`v0.2.4`** (2026-10-30, after Fan's own trial of v0.2.3): output redone — `status` is a tool × host matrix (`--long` for the old list), `upgrade` / `--fetch` / `--apply` list only rows that changed or need attention and fold the rest into `Not shown`, dry-run says what would happen in words, per-tool progress lines and `✓ host (n/N)`, a next-step hint on a terminal; `9e1694c` fixes the four bugs the trial found (below) plus the npm 120 s cap and the duplicate agent / cursor-agent download; a brew apply whose reprobe moved the version counts as applied (`87cf88a`)
+  - Tag **`v0.2.5`** (2026-10-30): table column widths ignore ANSI colour codes (the yellow `↑` cells had widened every status matrix column by ~9)
   - Before that: Ctrl-C is reported as `interrupted`, not `unreachable`; the kill-tree KILL trusts only PID+start time (BusyBox without `lstart` KILLs only a direct child that is still the watchdog's sibling); npm aliases keep their real package name; a staged run hit by Ctrl-C sets a host error, so it never exits 0
 - `1cad8412` — squash-merge of **PR #4** (*Harden staged apply against mise shims, keychain rollbacks, and summary counts*)
 - Prior merges worth knowing:
@@ -47,7 +48,7 @@ Open PRs: none at handoff time.
 
 ## Install on Fan's control machine (Mac Studio)
 
-- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.4`, updated 2026-10-30 with `clifleet update`; SHA256SUMS and attestation verified).
+- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.5`, updated 2026-10-30 with `clifleet update`; SHA256SUMS and attestation verified).
 - The 2026-10-29 13:31 apply report is kept as `~/.cache/clifleet/last-report-20261029-1331.json`; the 2026-10-30 apply report as `last-report-20261030-apply.json`; `last-report.json` now holds the latest status run.
 - Config: `~/.config/clifleet/hosts.toml` (timeout currently **`10m`**, concurrency `4`)
 - Cache / durable last run: `~/.cache/clifleet/last-report.json` plus `npm/`, `release/`, `staged/`
