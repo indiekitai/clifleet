@@ -154,7 +154,8 @@ Left, none started (from the code review, `docs/reviews/2026-10-29-代码审查.
    - dry-run promised to stage claw1 openclaw, but the Node engines check only runs at fetch, so the real run says `blocked`; dry-run should run the same preflight or say "may be blocked".
    - mbp agent and cursor-agent (version unreadable, keychain locked) would each download the same ~180 MB Cursor package: an unreadable version cannot skip, and the two aliases do not share the download.
    - mac-studio opencode (`anomalyco/tap/opencode-v2`, no LATEST from the API) runs `brew update && brew fetch` every time even when current.
-7. Smaller: `hostRun` struct for the shared parameters of `finishStage` / `finishSafe` / `runStageSteps` / `oneHost`; an AGENTS.md pointing Codex at CLAUDE.md.
+7. npm fetch is capped at a fixed 120 s (`limitSeconds` in `internal/probe/stage.go`); brew and release grow to the host timeout, npm does not, so `--timeout` cannot help it. npm Codex now packs a 147 MB platform package (`@openai/codex@<ver>-darwin-arm64`): 47 s alone on mac-studio, but it timed out in the 2026-10-30 fleet fetch while other downloads shared the link. Likely fix: let npm grow to the host timeout like the others (the cap is a hang guard, not an estimate).
+8. Smaller: `hostRun` struct for the shared parameters of `finishStage` / `finishSafe` / `runStageSteps` / `oneHost`; an AGENTS.md pointing Codex at CLAUDE.md.
 
 ## Suggested first week for the next maintainer
 
