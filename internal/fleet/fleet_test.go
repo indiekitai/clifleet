@@ -865,3 +865,47 @@ func TestInterruptedProbeIsNotUnreachable(t *testing.T) {
 		t.Fatalf("%+v", row)
 	}
 }
+
+// brew upgrade can link the new keg and still exit non-zero; the reprobe
+// decides. npm keeps its failure even when the version moved (rollback).
+func TestBrewApplyThatMovedTheVersionIsApplied(t *testing.T) {
+	cfg := parseFleet(t, "[[hosts]]\nname = \"box\"\nssh = \"box\"\ntools = [\"opencode\", \"codex\"]\n")
+	brewLine := func(v string) string {
+		return withBrew(present("opencode", "/opt/homebrew/bin/opencode", "/opt/homebrew/Cellar/opencode/"+v+"/bin/opencode", v), "formula", "opencode")
+	}
+	npmLine := func(v string) string {
+		return withPkg(present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", v), "@openai/codex")
+	}
+	run := func(opencodeAfter, codexAfter string) map[string]Row {
+		t.Helper()
+		fake := &fakeRunner{
+			probe: map[string]string{"box": probeOut(brewLine("1.3.0"), npmLine("0.1.0"))},
+			apply: map[string]string{"box": strings.Join([]string{
+				"clifleet-apply/1",
+				actionLine("apply", "opencode", "blocked", "Xcode is too old for Homebrew"),
+				actionLine("apply", "codex", "1", "rollback failed"),
+				"clifleet-probe/1",
+				brewLine(opencodeAfter),
+				npmLine(codexAfter),
+			}, "\n") + "\n"},
+		}
+		got, err := Upgrade(context.Background(), cfg, Options{Phase: PhaseApply}, fake)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rowsByTool(got)
+	}
+
+	rows := run("1.4.0", "0.2.0")
+	if r := rows["opencode"]; r.Status != StApplied || r.Version != "1.3.0 → 1.4.0" || r.Failed || !strings.Contains(r.Detail, "Xcode") {
+		t.Fatalf("opencode %+v", r)
+	}
+	if r := rows["codex"]; r.Status != StFailed || !r.Failed {
+		t.Fatalf("npm failure must stay a failure: %+v", r)
+	}
+
+	rows = run("1.3.0", "0.1.0")
+	if r := rows["opencode"]; r.Status != StBlocked || r.Version != "1.3.0" {
+		t.Fatalf("unchanged opencode %+v", r)
+	}
+}

@@ -289,6 +289,9 @@ func renderStageRow(name string, p plan, phase string, dry bool, actions map[str
 		row.Failed = true
 		return row
 	}
+	if moved, ok := brewUpgradedAnyway(phase, p, row.Version, res, after[name]); ok {
+		return moved
+	}
 	if res.Blocked != "" {
 		row.Status = StBlocked
 		row.Detail = res.Blocked
@@ -339,6 +342,37 @@ func renderStageRow(name string, p plan, phase string, dry bool, actions map[str
 	}
 	row.Status = StApplied
 	return row
+}
+
+// brewUpgradedAnyway covers brew upgrade pouring and linking the new keg and
+// then exiting non-zero (an Xcode check, a dependent, cleanup): the reprobe
+// shows the new version, so the row says applied and keeps brew's complaint.
+// Only brew: a failed npm or release apply rolls back, and a version that
+// moved after a failed rollback must stay a failure.
+func brewUpgradedAnyway(phase string, p plan, before string, res probe.ActionResult, next catalog.Observation) (Row, bool) {
+	if phase != PhaseApply || p.stage.Kind != catalog.MethodBrew || (res.Blocked == "" && res.Exit == 0) {
+		return Row{}, false
+	}
+	if before == "unknown" || unreadableVersion(p.obs.Version) || !next.Present || unreadableVersion(next.Version) {
+		return Row{}, false
+	}
+	afterV := probe.ShortVersion(next.Version)
+	if afterV == "" || afterV == before {
+		return Row{}, false
+	}
+	complaint := res.Blocked
+	if complaint == "" {
+		complaint = res.Detail
+	}
+	if complaint == "" {
+		complaint = fmt.Sprintf("exit %d", res.Exit)
+	}
+	row := presentRow(p.spec.Name, p, StInstalled, "brew upgrade also reported: "+complaint, false)
+	row.Method = p.stage.Method
+	if p.stage.Apply != nil {
+		row.Command = p.stage.Apply.Display
+	}
+	return noteVersion(row, before, next, StApplied), true
 }
 
 // currentRow is a tool fetch skipped: its installed version already is the
