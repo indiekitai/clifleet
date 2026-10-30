@@ -685,11 +685,11 @@ cf_npm_swap() {
   if [ -n "$cf_sw_plat" ]; then
     # The staged platform package goes in below by hand; npm must not fetch
     # it (or any other optional dependency) from the registry during apply.
-    if ! npm install -g --prefix "$prefix" --omit=optional --no-fund --no-audit "$tarball" </dev/null >&2; then
+    if ! npm install -g --prefix "$prefix" --omit=optional --prefer-offline --no-fund --no-audit "$tarball" </dev/null >&2; then
       cf_swap_err="npm install failed"
       return 1
     fi
-  elif ! npm install -g --prefix "$prefix" --include=optional --no-fund --no-audit "$tarball" </dev/null >&2; then
+  elif ! npm install -g --prefix "$prefix" --include=optional --prefer-offline --no-fund --no-audit "$tarball" </dev/null >&2; then
     cf_swap_err="npm install failed"
     return 1
   fi

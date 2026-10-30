@@ -38,6 +38,7 @@ Checked against `origin/main` on 2026-10-29 (Asia/Tokyo). Tip SHA, PR #2–#4 su
   - Tag **`v0.2.4`** (2026-10-30, after Fan's own trial of v0.2.3): output redone — `status` is a tool × host matrix (`--long` for the old list), `upgrade` / `--fetch` / `--apply` list only rows that changed or need attention and fold the rest into `Not shown`, dry-run says what would happen in words, per-tool progress lines and `✓ host (n/N)`, a next-step hint on a terminal; `9e1694c` fixes the four bugs the trial found (below) plus the npm 120 s cap and the duplicate agent / cursor-agent download; a brew apply whose reprobe moved the version counts as applied (`87cf88a`)
   - Tag **`v0.2.5`** (2026-10-30): table column widths ignore ANSI colour codes (the yellow `↑` cells had widened every status matrix column by ~9)
   - Tag **`v0.2.6`** (2026-10-30): scripts drop cmux's per-session wrapper dirs (`~/.cmuxterm/cmux-cli-shims/<id>/`) from PATH. Run from a cmux session, the local host showed amp and hermes as installed with `?` (only the wrappers exist on mac-studio); from a plain terminal they were correctly not installed
+  - Tag **`v0.2.7`** (2026-10-30): npm fetch downloads the dependencies too (see Backlog 5); first real check of the v0.2.4 fixes in Fan's apply: claw1 claude 2.1.312 → 2.1.314 through the root link, npm codex 0.165.0 → 0.166.0 on mac-studio and claw1
   - Before that: Ctrl-C is reported as `interrupted`, not `unreachable`; the kill-tree KILL trusts only PID+start time (BusyBox without `lstart` KILLs only a direct child that is still the watchdog's sibling); npm aliases keep their real package name; a staged run hit by Ctrl-C sets a host error, so it never exits 0
 - `1cad8412` — squash-merge of **PR #4** (*Harden staged apply against mise shims, keychain rollbacks, and summary counts*)
 - Prior merges worth knowing:
@@ -49,7 +50,7 @@ Open PRs: none at handoff time.
 
 ## Install on Fan's control machine (Mac Studio)
 
-- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.6`, updated 2026-10-30 with `clifleet update`; SHA256SUMS and attestation verified).
+- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.7`, updated 2026-10-30 with `clifleet update`; SHA256SUMS and attestation verified).
 - The 2026-10-29 13:31 apply report is kept as `~/.cache/clifleet/last-report-20261029-1331.json`; the 2026-10-30 apply report as `last-report-20261030-apply.json`; `last-report.json` now holds the latest status run.
 - Config: `~/.config/clifleet/hosts.toml` (timeout currently **`10m`**, concurrency `4`)
 - Cache / durable last run: `~/.cache/clifleet/last-report.json` plus `npm/`, `release/`, `staged/`
@@ -167,7 +168,7 @@ Left, none started (from the code review, `docs/reviews/2026-10-29-代码审查.
    - mac-studio opencode (`anomalyco/tap/opencode-v2`, not in the formulae.brew.sh API, so no LATEST) runs `brew update && brew fetch` every time even when current.
 4. From Fan's v0.2.6 fetch (2026-10-30): a `staged` row spells out the cache path (`staged (/Users/tf/.cache/clifleet/npm/codex/openai-codex-0.166.0.tgz)`, `staged (brew cache (formula opencode-v2))`), which makes the table wide and says nothing the user needs. Show `staged → 0.166.0` (or plain `staged` when the version is unknown); keep the path for `--long` / `--json`. mbp codex (native, 166 MB) timed out at the 580 s release cap: GitHub runs ~258 KB/s direct from mbp (~11 min), while the Cursor CDN took 5 s; retry with `--timeout 20m`, not a product fix (Fan's call on slow hosts).
 
-5. **npm apply downloads the dependencies (dsh timed out on mac-studio and mbp, 2026-10-30 v0.2.6 apply).** Fetch only `npm pack`s the main tarball (dsh: 25 KB); apply then runs `npm install -g --prefix <tmp>` from the registry, which for dsh is 618 packages / 853 MB (54 s on mac-studio alone), then `cp -a` 853 MB to the install filesystem (27 s), all under the fixed 180 s apply cap that `--timeout` cannot raise. Both hosts were left intact on rc.2, no `.clifleet-dsh-*` leftovers. Fix: fetch warms the npm cache (full install into a temp prefix, then removed) so apply installs with `--prefer-offline`, and the npm apply cap grows with the host budget like fetch.
+5. Done in v0.2.7: npm fetch warms the npm cache (full install into a throwaway prefix), apply installs with `--prefer-offline`, and the npm apply cap grows with the host budget. dsh had timed out on mac-studio and mbp because apply downloaded its 618 dependencies (853 MB installed) under a fixed 180 s; a sandboxed rc.2 → rc.5 repro now takes 75 s to fetch and 59 s to apply.
 
 9. Smaller: `hostRun` struct for the shared parameters of `finishStage` / `finishSafe` / `runStageSteps` / `oneHost`; an AGENTS.md pointing Codex at CLAUDE.md.
 

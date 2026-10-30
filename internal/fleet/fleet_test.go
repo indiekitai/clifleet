@@ -218,7 +218,7 @@ tools = ["claude", "codex", "cursor", "opencode"]
 	if !strings.Contains(joined, "stage_npm 'codex' '@openai/codex'") || !strings.Contains(joined, "stage_brew 'opencode' 'formula' 'opencode'") {
 		t.Fatalf("fetch script:\n%s", joined)
 	}
-	if strings.Contains(joined, "'claude' 'update'") || strings.Contains(joined, "npm install") || strings.Contains(joined, "stage_npm 'cursor'") {
+	if strings.Contains(joined, "'claude' 'update'") || strings.Contains(strings.ReplaceAll(joined, `npm install -g --prefix "$cf_nw_prefix"`, ""), "npm install") || strings.Contains(joined, "stage_npm 'cursor'") {
 		t.Fatalf("fetch touched a live or unstaged tool:\n%s", joined)
 	}
 	if !strings.Contains(joined, "stage_release_claude 'claude'") {

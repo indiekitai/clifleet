@@ -93,6 +93,23 @@ cf_brew_block_reason() {
 `
 
 const fetchFns = `
+# cf_npm_warm TARBALL PLAT installs the package into a throwaway prefix so
+# npm's cache holds every dependency (dsh pulls 618 packages). Apply then
+# installs with --prefer-offline instead of downloading them under its cap.
+cf_npm_warm() {
+  cf_nw_prefix=$cf_dir/npm-warm
+  cf_rmtree "$cf_nw_prefix"
+  mkdir -p "$cf_nw_prefix" || return 1
+  cf_nw_opt=--include=optional
+  if [ -n "$2" ] && [ "$2" != - ]; then
+    cf_nw_opt=--omit=optional
+  fi
+  npm install -g --prefix "$cf_nw_prefix" "$cf_nw_opt" --no-fund --no-audit "$1" </dev/null >&2
+  cf_nw_rc=$?
+  cf_rmtree "$cf_nw_prefix"
+  return $cf_nw_rc
+}
+
 stage_npm() {
   tool=$1
   pkg=$2
@@ -138,10 +155,14 @@ stage_npm() {
       return 0
     }
   fi
+  est=$(cf_engines_status "$eng")
+  if [ "$est" = ok ] && ! cf_npm_warm "$tarball" "$plat"; then
+    cf_report fetch "$tool" 1 "could not download the dependencies"
+    return 0
+  fi
   tmp="$root/staged/$tool.tmp"
   printf 'npm\t%s\t%s\t%s\t%s\t%s\n' "$pkg" "$tarball" "$ver" "$eng" "$plat" > "$tmp" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
   mv -f "$tmp" "$root/staged/$tool" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
-  est=$(cf_engines_status "$eng")
   case $est in
     ok) cf_report fetch "$tool" 0 "$tarball" ;;
     *) cf_report fetch "$tool" blocked "${est#blocked: }" ;;
@@ -478,8 +499,15 @@ func limitSeconds(fetch bool, kind string, toolTimeout time.Duration) int {
 	}
 	if !fetch {
 		secs := apply
-		if kind == catalog.MethodBrew {
+		switch kind {
+		case catalog.MethodBrew:
 			secs = brew
+		case catalog.MethodNpm:
+			// Copying and swapping a large package tree (dsh: 853 MB) can
+			// outlast the fixed cap; it is a hang guard, so it grows too.
+			if avail > secs {
+				secs = avail
+			}
 		}
 		if avail > 0 && secs > avail {
 			secs = avail

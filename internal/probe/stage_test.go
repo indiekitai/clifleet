@@ -40,8 +40,14 @@ func TestStageScriptsStayInTheirPhase(t *testing.T) {
 			t.Fatalf("fetch script missing %q", want)
 		}
 	}
+	// The one npm install fetch may run fills npm's cache through a
+	// throwaway prefix; any other npm install would touch a live package.
+	warm := `npm install -g --prefix "$cf_nw_prefix"`
+	if strings.Count(fetch, warm) != 1 {
+		t.Fatalf("fetch script should warm the npm cache once, got %d", strings.Count(fetch, warm))
+	}
 	for _, bad := range []string{"npm install", "brew upgrade", "brew install", "'claude' 'update'", "codex update", "@latest@latest"} {
-		if strings.Contains(fetch, bad) {
+		if strings.Contains(strings.Replace(fetch, warm, "", 1), bad) {
 			t.Fatalf("fetch script contains %q", bad)
 		}
 	}
@@ -2165,6 +2171,12 @@ func TestNpmFetchLimitTracksToolBudget(t *testing.T) {
 	if got := limitSeconds(true, catalog.MethodNpm, 0); got != 120 {
 		t.Fatalf("npm fetch cap without a budget: %ds", got)
 	}
+	if got := limitSeconds(false, catalog.MethodNpm, 10*time.Minute); got != 580 {
+		t.Fatalf("npm apply cap under a 10m budget: %ds", got)
+	}
+	if got := limitSeconds(false, catalog.KindRelease, 10*time.Minute); got != 180 {
+		t.Fatalf("release apply cap moved: %ds", got)
+	}
 }
 
 // The remote cap must stay under a short host budget, or SSH kills the
@@ -2697,5 +2709,88 @@ func TestApplyGoesAheadWhenLiveVersionIsUnreadable(t *testing.T) {
 	}
 	if ShortVersion(obs.Version) != "2.1.314" {
 		t.Fatalf("claude not applied: %+v", obs)
+	}
+}
+
+// npm fetch downloads the dependencies too: it installs the packed tarball
+// into a throwaway prefix (filling npm's cache) and removes it. A failed
+// dependency download is a failed fetch with no stamp, so apply never has to
+// reach the registry under its own cap.
+func TestNpmFetchWarmsTheCache(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	for _, fail := range []bool{false, true} {
+		root := t.TempDir()
+		home := filepath.Join(root, "home")
+		bin := filepath.Join(root, "bin")
+		cache := filepath.Join(root, "xdg")
+		if err := os.MkdirAll(bin, 0o755); err != nil || os.MkdirAll(home, 0o755) != nil {
+			t.Fatal(err)
+		}
+		pkg := filepath.Join(root, "dsh.tgz")
+		writeTarGz(t, pkg, map[string]string{
+			"package/package.json": `{"name":"@deepseek-ai/dsh","version":"0.2.1-rc.5"}`,
+		})
+		log := filepath.Join(root, "npm.log")
+		writeExe(t, filepath.Join(bin, "npm"), `#!/bin/sh
+case $1 in
+  pack)
+    dest=
+    prev=
+    for a in "$@"; do
+      if [ "$prev" = --pack-destination ]; then dest=$a; fi
+      prev=$a
+    done
+    cp "$PKG" "$dest/deepseek-ai-dsh-0.2.1-rc.5.tgz"
+    printf 'deepseek-ai-dsh-0.2.1-rc.5.tgz\n'
+    ;;
+  install)
+    prefix=
+    prev=
+    for a in "$@"; do
+      if [ "$prev" = --prefix ]; then prefix=$a; fi
+      prev=$a
+    done
+    printf 'install %s\n' "$*" >> "$NPM_LOG"
+    [ -d "$prefix" ] || exit 9
+    mkdir -p "$prefix/lib/node_modules/dep"
+    [ -z "${NPM_FAIL:-}" ]
+    ;;
+  *) exit 0 ;;
+esac
+`)
+		env := []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + home, "XDG_CACHE_HOME=" + cache, "PKG=" + pkg, "NPM_LOG=" + log}
+		if fail {
+			env = append(env, "NPM_FAIL=1")
+		}
+		fetch, err := FetchScript([]string{bin}, []StageStep{{Tool: "dsh", Kind: catalog.MethodNpm, Package: "@deepseek-ai/dsh"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := runSh(t, fetch, env)
+		results, err := ParseFetch(out)
+		if err != nil || len(results) != 1 {
+			t.Fatalf("fetch %v %+v\n%s", err, results, out)
+		}
+		got, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatalf("npm install never ran: %v\n%s", err, out)
+		}
+		line := string(got)
+		if strings.Count(line, "--prefix") != 1 || !strings.Contains(line, "/npm-warm ") ||
+			!strings.Contains(line, filepath.Join(cache, "clifleet", "npm", "dsh", "deepseek-ai-dsh-0.2.1-rc.5.tgz")) {
+			t.Fatalf("warm install %q", line)
+		}
+		_, stampErr := os.Stat(filepath.Join(cache, "clifleet", "staged", "dsh"))
+		if fail {
+			if results[0].Exit != 1 || !strings.Contains(results[0].Detail, "could not download the dependencies") || !os.IsNotExist(stampErr) {
+				t.Fatalf("failed warm: %+v stamp %v", results[0], stampErr)
+			}
+			continue
+		}
+		if results[0].Exit != 0 || stampErr != nil {
+			t.Fatalf("fetch %+v stamp %v\n%s", results[0], stampErr, out)
+		}
 	}
 }
