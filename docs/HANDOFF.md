@@ -35,6 +35,7 @@ Checked against `origin/main` on 2026-10-29 (Asia/Tokyo). Tip SHA, PR #2–#4 su
   - `be8527c` + tag **`v0.2.1`**: release runs the tests first, Actions pinned to commit SHAs, build provenance attestation on the tarballs and `SHA256SUMS`; `install.sh` and `clifleet update` run `gh attestation verify` when gh is logged in (`CLIFLEET_NO_ATTESTATION=1` skips). Verified end to end 2026-10-29: release green, attestation verifies, install.sh and a real v0.2.0 → v0.2.1 update on Mac Studio
   - Tag **`v0.2.2`** (2026-10-30, release green, release-check showed only the intended help changes): `clifleet history` + `history.jsonl` (every non-dry-run upgrade / fetch / apply, one line per host × tool); `skills/clifleet/SKILL.md` + `TestSkillNamesOnlyRealCommandsAndFlags`; terminal-only "newer clifleet available" notice (`CLIFLEET_NO_UPDATE_CHECK=1` off); `scripts/release-check.sh`
   - Tag **`v0.2.3`** (2026-10-30, release-check showed only the intended LATEST / help changes): `76b136a` LATEST column in `status` and fetch skip for tools already on the newest version (`internal/latest`, `internal/semver`); then a failed fetch drops the tool's old stamp so apply cannot open a partial download
+  - Tag **`v0.2.4`** (2026-10-30, after Fan's own trial of v0.2.3): output redone — `status` is a tool × host matrix (`--long` for the old list), `upgrade` / `--fetch` / `--apply` list only rows that changed or need attention and fold the rest into `Not shown`, dry-run says what would happen in words, per-tool progress lines and `✓ host (n/N)`, a next-step hint on a terminal; `9e1694c` fixes the four bugs the trial found (below) plus the npm 120 s cap and the duplicate agent / cursor-agent download; a brew apply whose reprobe moved the version counts as applied (`87cf88a`)
   - Before that: Ctrl-C is reported as `interrupted`, not `unreachable`; the kill-tree KILL trusts only PID+start time (BusyBox without `lstart` KILLs only a direct child that is still the watchdog's sibling); npm aliases keep their real package name; a staged run hit by Ctrl-C sets a host error, so it never exits 0
 - `1cad8412` — squash-merge of **PR #4** (*Harden staged apply against mise shims, keychain rollbacks, and summary counts*)
 - Prior merges worth knowing:
@@ -46,8 +47,8 @@ Open PRs: none at handoff time.
 
 ## Install on Fan's control machine (Mac Studio)
 
-- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.2`, updated 2026-10-30 with `clifleet update`; SHA256SUMS and attestation verified). After that, `doctor` and `status` were ok on all four hosts with the same readings as below.
-- The 2026-10-29 13:31 apply report is kept as `~/.cache/clifleet/last-report-20261029-1331.json`; `last-report.json` now holds the latest status run.
+- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.4`, updated 2026-10-30 with `clifleet update`; SHA256SUMS and attestation verified).
+- The 2026-10-29 13:31 apply report is kept as `~/.cache/clifleet/last-report-20261029-1331.json`; the 2026-10-30 apply report as `last-report-20261030-apply.json`; `last-report.json` now holds the latest status run.
 - Config: `~/.config/clifleet/hosts.toml` (timeout currently **`10m`**, concurrency `4`)
 - Cache / durable last run: `~/.cache/clifleet/last-report.json` plus `npm/`, `release/`, `staged/`
 - Control machine id for Cursor local tools: `4115756c-6089-4706-ab99-39b456da5650` (label Mac-Studio.local)
@@ -97,9 +98,20 @@ Host facts found 2026-10-30: mbp's proxy is set by `proxy_on` in `~/.zshrc`, whi
 - **mbp:**
   - claude still **2.1.296**: the 276 MB download timed out twice (191 MB in 30 min, direct link ~270 KB/s; the same file through mbp's proxy runs ~5 MB/s).
   - opencode: apply reported `blocked` (Xcode is too old), but brew had already poured and linked **2.2.1** (Cellar and link dated 01:45) and only then exited non-zero. A reporting bug, fixed on main after v0.2.3: a brew apply whose reprobe shows a new version is `applied`, with brew's complaint in the detail.
-  - codex and agent apply failed with `could not extract`. Cause: a clifleet bug. A failed fetch left the 10-29 stamps pointing at files it had already deleted and partly re-downloaded. Fixed on main (`cf_unstage` at the start of every fetch, `TestFailedFetchDropsTheOldStamp`); nothing was swapped. The two stale stamps (`~/.cache/clifleet/staged/codex`, `staged/agent`) are **still on mbp**, and the v0.2.2 binary still writes the old scripts, so `--apply --hosts mbp` repeats the error until a fetch from a fixed binary rewrites or removes them (or they are deleted by hand).
+  - codex and agent apply failed with `could not extract`. Cause: a clifleet bug. A failed fetch left the 10-29 stamps pointing at files it had already deleted and partly re-downloaded. Fixed on main (`cf_unstage` at the start of every fetch, `TestFailedFetchDropsTheOldStamp`); nothing was swapped. The two stale stamps were gone after the v0.2.3 fetch (checked 2026-10-30).
   - agent / cursor-agent versions are unreadable (`keychain locked`).
 - **claw1:** openclaw `blocked` (needs Node ≥ 24.22.1, has v22.23.4); the rest up to date.
+
+## Fan's trial run (2026-10-30 afternoon, v0.2.3)
+
+Fan ran `upgrade --fetch` then `--apply` himself. It surfaced four bugs, all fixed in v0.2.4 (`9e1694c`), nothing left broken on a host (every failed swap rolled back):
+
+- Apply could downgrade from a stale stamp (mac-studio claude 2.1.314 → staged 2.1.312, the staged binary died with exit 137, rolled back). Now apply refuses a stamp older than the live version and drops it (`cf_refuse_older`; Cursor builds compare by date).
+- npm Codex: the platform tarball's package.json is named `@openai/codex`, so the old swap wrote it over the main package and rolled back. Now the main package installs with `--omit=optional` and the platform package is unpacked into `@openai/codex/node_modules/@openai/codex-<platform>`, where `codex.js` looks for it (`cf_nest_platform`).
+- claw1 claude sits behind a root-owned `/usr/local/bin/claude` → `~/.local/bin/claude` → `versions/`; apply tried to retarget the root link. Now it follows the chain to the link that points into `versions/` (`cf_versions_link`, same for Cursor Agent).
+- Prereleases compared equal (dsh 0.2.1-rc.2 vs rc.5). Apply now compares the full version (`cf_semver_full`, `cf_ver_cmp`).
+
+Stale stamps from that run were deleted by hand (Fan OKed): mac-studio `claude`, `agent`, `cursor-agent`; mbp `opencode`, `pi`; claw1 `agent`, `cursor-agent`, `opencode`. Fresh stamps left for the next `--apply`: mac-studio `dsh`, `opencode`; mbp `claude`, `cursor-agent`, `dsh`; claw1 `claude` (2.1.314, the root-link case), `codex`, `openclaw`. Not yet applied with v0.2.4 (needs Fan's timing OK): claw1 claude 2.1.312 → 2.1.314, codex 0.165.0 → 0.166.0 (npm, mac-studio / claw1; mbp is native), dsh rc.2 → rc.5. Cause of the exit 137 itself (staged claude 2.1.312 killed on mac-studio) is unknown.
 
 ## Open gaps (product vs host)
 
@@ -147,24 +159,10 @@ Left, none started (from the code review, `docs/reviews/2026-10-29-代码审查.
 
 1. Move the remote shell out of Go strings into `go:embed` `.sh` files, then run `shellcheck -s sh` / `dash -n` / `checkbashisms` in CI.
 2. Remote lock per host: stops two concurrent applies on one machine and gives a Ctrl-C'd run's remote step a way to stop.
-3. Progress lines read like an estimate: `→ claw1 (10m0s)` is the per-host time limit, not how long it will take (Fan asked "这是什么意思？", 2026-10-30). Fan's call: drop the duration from the line, or show a running spinner / progress (hosts done out of total) in a terminal instead. Not started; ask before changing. Same need for fetch/apply (Fan, 2026-10-30, "没有进度提示，干等"): after `→ host` nothing prints until `✓ host`, minutes later. Print each tool as it starts and ends (`mbp claude 下载中…`, `mbp claude ✓ 2m10s`); bytes so far would need the remote script to report them.
-4. `status` table is hard to read: one row per host × tool (72 rows for 4 hosts, half `not installed`). Fan wants a matrix (2026-10-30): tools as rows, hosts as columns, only tools installed somewhere; cell `✓` up to date, `↑ <installed>` behind (yellow), `*` one-shot only, `?` version unreadable, `·` not installed; one summary line of what is behind. Keep the current list as `--long`, `--json` unchanged, fall back to the list when the matrix is wider than the terminal. Same matrix for upgrade results (`old → new` or the failure reason).
-5. Next-step hint at the end of a terminal run (Fan, 2026-10-30, "接下来我应该做什么？"): after `status` with updates, say to run `clifleet upgrade --fetch` then `--apply`, and name the one-shot-only tools; after `--fetch`, say `clifleet upgrade --apply`; after `--apply` with failures, point at `clifleet history` / the narrow retry. Not under `--json` or a pipe.
-6. `upgrade --dry-run` is as hard to read as status (Fan, 2026-10-30, "这个看起来也费劲"). In the matrix, a cell says what will happen (`↓ 0.166.0` will fetch, `✓`, `one-shot`, `mise`, `blocked: …`), not the shell command; commands only under `--long` / `--verbose`. The summary counts `not installed` apart from real skips (today "39 skipped" mixes them). Findings from that run, to fix with it:
-   - dry-run promised to stage claw1 openclaw, but the Node engines check only runs at fetch, so the real run says `blocked`; dry-run should run the same preflight or say "may be blocked".
-   - mbp agent and cursor-agent (version unreadable, keychain locked) would each download the same ~180 MB Cursor package: an unreadable version cannot skip, and the two aliases do not share the download.
-   - mac-studio opencode (`anomalyco/tap/opencode-v2`, no LATEST from the API) runs `brew update && brew fetch` every time even when current.
-7. npm fetch is capped at a fixed 120 s (`limitSeconds` in `internal/probe/stage.go`); brew and release grow to the host timeout, npm does not, so `--timeout` cannot help it. npm Codex now packs a 147 MB platform package (`@openai/codex@<ver>-darwin-arm64`): 47 s alone on mac-studio, but it timed out in the 2026-10-30 fleet fetch while other downloads shared the link. Likely fix: let npm grow to the host timeout like the others (the cap is a hang guard, not an estimate).
-8. `upgrade --apply` should list only what this run changed or failed on (Fan, 2026-10-30): applied (`old → new`), failed / blocked with the reason, then one summary line; untouched rows (up to date, not installed, no-stage) only under `--long`.
-
-Bugs found by Fan's own 2026-10-30 fetch + apply (v0.2.3), all diagnosed, none fixed yet:
-
-- **Apply can downgrade from a stale stamp.** mac-studio claude was 2.1.314; fetch skipped it as up to date but left the 2026-10-29 stamp (2.1.312), and apply installed that, then the staged binary died with exit 137 and the link was put back. mbp opencode the same way: an old brew stamp made apply rerun `brew upgrade` (blocked again). Fix: apply refuses a staged version older than the live one; a fetch that skips a tool as current also drops its stamp.
-- **npm Codex apply cannot work.** The platform tarball's package.json is named `@openai/codex` (version `0.166.0-linux-x64`); the real install puts it under the alias `@openai/codex-linux-x64`. `cf_tarball_name` reads `@openai/codex`, so `plat_dest` is the main package dir, the new codex does not run, and it rolls back (claw1 "new package did not run; previous install restored"). Use the alias name `@openai/codex-<platform>`; the test fixtures need the real tarball naming.
-- **Claude behind a root-owned link.** claw1 PATH finds `/usr/local/bin/claude` (root, → `~/.local/bin/claude` → `versions/2.1.312`); apply tries to retarget the root link and fails ("could not retarget claude symlink"), after already publishing `versions/2.1.314`. Retarget the user-owned link in the chain that points into `versions/`.
-- **Prerelease versions compare equal.** `cf_semver_line` keeps only `X.Y.Z`, so dsh 0.2.1-rc.2 vs staged 0.2.1-rc.5 is "up to date" and never upgrades.
-- Stale stamps still on hosts after this run (as of 2026-10-30 13:20 JST): mac-studio `claude` (2.1.312), `agent`, `cursor-agent` (10-29); mbp `opencode`, `pi`; claw1 `agent`, `cursor-agent`, `opencode` (10-29).
-
+3. Done in v0.2.4: progress lines, status matrix, next-step hint, readable dry-run, apply lists only what changed, npm fetch limit, shared agent / cursor-agent download, and the four trial bugs (see "Fan's trial run"). Left from the same trial:
+   - An `--apply` dry run only probes, so it cannot see which tools have a stamp; its rows say `would apply if staged`. Proper fix: the probe emits a `staged` line per tool (stamp version), the parser and `renderStageRow` use it, and dry-run shows `would apply <old> → <new>` or folds the row.
+   - dry-run promises to stage claw1 openclaw, but the Node engines check only runs at fetch, so the real run says `blocked`; dry-run should run the same preflight or say "may be blocked".
+   - mac-studio opencode (`anomalyco/tap/opencode-v2`, not in the formulae.brew.sh API, so no LATEST) runs `brew update && brew fetch` every time even when current.
 9. Smaller: `hostRun` struct for the shared parameters of `finishStage` / `finishSafe` / `runStageSteps` / `oneHost`; an AGENTS.md pointing Codex at CLAUDE.md.
 
 ## Suggested first week for the next maintainer

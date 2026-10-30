@@ -224,8 +224,9 @@ counted on one "Not shown" line; --long prints every row.
 
 --dry-run still connects, so the plan matches the install method on disk,
 but it does not run the upgrade. The table says what would happen (would
-fetch → 0.166.0, would apply); the shell commands are in --long, -v, and
---json.
+fetch → 0.166.0); the shell commands are in --long, -v, and --json. An
+--apply dry run does not read the staged cache, so its rows say "would
+apply if staged".
 
 While a fetch or apply runs, stderr shows one line when each tool starts
 and ends, and "✓ host (3/4)" when a host is done.

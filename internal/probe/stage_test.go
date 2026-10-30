@@ -2683,3 +2683,19 @@ esac
 		}
 	}
 }
+
+// A live version that cannot be read (keychain prompt, garbage) is no reason
+// to refuse: apply goes ahead as it did before the older-stamp check.
+func TestApplyGoesAheadWhenLiveVersionIsUnreadable(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	_, localBin, _, env := claudeStampFixture(t, "unreadable", "2.1.314", false)
+	got, obs := applyClaude(t, []string{localBin}, env)
+	if got.Exit != 0 || got.Skip != "" || got.Blocked != "" {
+		t.Fatalf("apply %+v", got)
+	}
+	if ShortVersion(obs.Version) != "2.1.314" {
+		t.Fatalf("claude not applied: %+v", obs)
+	}
+}

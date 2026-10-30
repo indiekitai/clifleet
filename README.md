@@ -241,7 +241,7 @@ clifleet upgrade --apply    # swap only, from the cache fetch wrote
 clifleet upgrade --one-shot # in-place updater, for tools marked no-stage
 ```
 
-`upgrade` lists only the rows where something happened or needs attention (applied, staged, failed, blocked, and dry-run rows that would act) and folds the rest into one `Not shown` line with counts; `--long` prints every row. A dry run says what would happen (`would fetch → 0.166.0`, `would apply`) and keeps the shell command for `--long`, `-v`, and `--json`. While a fetch or apply runs, stderr shows one line when each tool starts and ends, and `✓ host (3/4)` when a host finishes.
+`upgrade` lists only the rows where something happened or needs attention (applied, staged, failed, blocked, and dry-run rows that would act) and folds the rest into one `Not shown` line with counts; `--long` prints every row. A dry run says what would happen (`would fetch → 0.166.0`; an `--apply` dry run cannot see the staged cache, so it says `would apply if staged`) and keeps the shell command for `--long`, `-v`, and `--json`. While a fetch or apply runs, stderr shows one line when each tool starts and ends, and `✓ host (3/4)` when a host finishes.
 
 `clifleet fetch` and `clifleet apply` are the same two steps. `--hosts`, `--only`, `--timeout`, `--parallel`, `--json`, and `--dry-run` work as they do on `upgrade`. `--dry-run` still connects, prints the command for the install method on disk, and does not run it. `--fetch` and `--apply` together are an error.
 
