@@ -17,7 +17,7 @@ func Render(headers []string, rows [][]string, color bool) string {
 	}
 	for _, row := range rows {
 		for i := 0; i < len(headers) && i < len(row); i++ {
-			n := utf8.RuneCountInString(row[i])
+			n := utf8.RuneCountInString(stripANSI(row[i]))
 			if n > width[i] {
 				width[i] = n
 			}
