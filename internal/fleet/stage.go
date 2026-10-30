@@ -27,11 +27,7 @@ func finishStage(ctx context.Context, result HostResult, target runner.Target, r
 	for i, name := range names {
 		result.Rows = append(result.Rows, renderStageRow(name, plans[i], phase, opt.DryRun, actions, after))
 	}
-	if hostBad(result) {
-		progress(opt, "✗ %s", result.Name)
-	} else {
-		progress(opt, "✓ %s", result.Name)
-	}
+	hostDone(opt, result.Name, hostBad(result), "")
 	return result
 }
 
@@ -66,11 +62,7 @@ func finishSafe(ctx context.Context, result HostResult, target runner.Target, ru
 	for i, name := range names {
 		result.Rows = append(result.Rows, renderSafeRow(name, plans[i], opt.DryRun, fetched, applied, after))
 	}
-	if hostBad(result) {
-		progress(opt, "✗ %s", result.Name)
-	} else {
-		progress(opt, "✓ %s", result.Name)
-	}
+	hostDone(opt, result.Name, hostBad(result), "")
 	return result
 }
 
@@ -90,45 +82,92 @@ func runStageSteps(ctx context.Context, target runner.Target, run runner.Runner,
 			}
 			continue
 		}
-		reprobe := reprobeFor(tools, step)
-		script, err := stageScript(phase, reprobe, extra, []probe.StageStep{step}, target.Timeout)
-		if err != nil {
-			actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: err.Error()}
-			continue
-		}
-		out, stderr, err := run.Run(ctx, target, script)
-		if strings.TrimSpace(stderr) != "" {
-			logs = append(logs, stderr)
-		}
-		if err != nil {
-			if errors.Is(err, runner.ErrInterrupted) && stopped == "" {
-				stopped = err.Error()
+		stageStart(opt, target.Name, phase, step.Tool)
+		started := time.Now()
+		func() {
+			reprobe := reprobeFor(tools, step)
+			script, err := stageScript(phase, reprobe, extra, []probe.StageStep{step}, target.Timeout)
+			if err != nil {
+				actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: err.Error()}
+				return
 			}
-			// A host timeout still returns whatever CF1 lines were printed.
-			// A tool that already reported its result is not failed with its siblings.
-			if res, ok := partialAction(phase, out, step.Tool); ok {
+			out, stderr, err := run.Run(ctx, target, script)
+			if strings.TrimSpace(stderr) != "" {
+				logs = append(logs, stderr)
+			}
+			if err != nil {
+				if errors.Is(err, runner.ErrInterrupted) && stopped == "" {
+					stopped = err.Error()
+				}
+				// A host timeout still returns whatever CF1 lines were printed.
+				// A tool that already reported its result is not failed with its siblings.
+				if res, ok := partialAction(phase, out, step.Tool); ok {
+					actions[step.Tool] = res
+					return
+				}
+				actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: err.Error()}
+				return
+			}
+			got, probed, err := parseStage(phase, out)
+			if err != nil {
+				actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: err.Error()}
+				return
+			}
+			res, ok := got[step.Tool]
+			if !ok {
+				actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: phase + " did not report a result"}
+			} else {
 				actions[step.Tool] = res
-				continue
 			}
-			actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: err.Error()}
-			continue
-		}
-		got, probed, err := parseStage(phase, out)
-		if err != nil {
-			actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: err.Error()}
-			continue
-		}
-		res, ok := got[step.Tool]
-		if !ok {
-			actions[step.Tool] = probe.ActionResult{Tool: step.Tool, Exit: 1, Detail: phase + " did not report a result"}
-		} else {
-			actions[step.Tool] = res
-		}
-		for k, v := range probed {
-			after[k] = v
-		}
+			for k, v := range probed {
+				after[k] = v
+			}
+		}()
+		stageEnd(opt, target.Name, phase, step.Tool, actions[step.Tool], time.Since(started))
 	}
 	return actions, after, strings.Join(logs, "\n"), stopped
+}
+
+// stageStart and stageEnd report one tool step on a host, so a long fetch
+// does not look hung. Plain lines only.
+func stageStart(opt Options, host, phase, tool string) {
+	verb := "fetching…"
+	if phase == PhaseApply {
+		verb = "applying…"
+	}
+	progress(opt, "  %s %s: %s", host, tool, verb)
+}
+
+func stageEnd(opt Options, host, phase, tool string, res probe.ActionResult, took time.Duration) {
+	reason := func(s string) string {
+		s = firstLine(s)
+		if len(s) > 80 {
+			s = s[:80] + "…"
+		}
+		return s
+	}
+	var out string
+	switch {
+	case res.Blocked != "":
+		out = "blocked (" + reason(res.Blocked) + ")"
+	case res.Skip != "" && strings.HasPrefix(res.Skip, "already "):
+		out = "up to date"
+	case res.Skip != "":
+		out = "skipped (" + reason(res.Skip) + ")"
+	case res.Exit != 0:
+		d := reason(res.Detail)
+		if d == "" {
+			d = fmt.Sprintf("exit %d", res.Exit)
+		}
+		out = "failed (" + d + ")"
+	case res.Current:
+		out = "up to date"
+	case phase == PhaseApply:
+		out = "applied"
+	default:
+		out = "staged (" + took.Round(time.Second).String() + ")"
+	}
+	progress(opt, "  %s %s: %s", host, tool, out)
 }
 
 func reprobeFor(tools []probe.Tool, step probe.StageStep) []probe.Tool {

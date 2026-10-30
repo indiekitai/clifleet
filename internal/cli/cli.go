@@ -132,6 +132,14 @@ version is "up to date", an older one "update available". A lookup that
 fails leaves LATEST empty and the row "installed"; it never fails status.
 --no-latest skips the lookups.
 
+The default output is a matrix: one row per tool installed on at least
+one host, one column per host. ✓ is up to date, "↑ 1.2.3" is behind LATEST
+(a trailing * means only upgrade --one-shot can update it), a bare version
+is installed with the newest unknown, ? is an unreadable version, and · is
+not installed. Tools installed nowhere are listed on one line. --long
+prints one row per host and tool instead, and status falls back to it when
+the matrix is wider than the terminal ($COLUMNS, else 120 on a terminal).
+
 --dry-run does not open connections. It prints the tools clifleet would
 look for after allowlists, blocklists, and --only.
 
@@ -152,6 +160,7 @@ Flags:
       --parallel N       Concurrent sessions (default 8, max 64)
       --dry-run          Print the probe plan; do not connect
       --no-latest        Do not look up the newest versions
+      --long             One row per host and tool instead of the matrix
       --json             Machine-readable matrix
   -v, --verbose          Include remote stderr after the table
   -h, --help
@@ -208,8 +217,18 @@ The result is also written to $XDG_CACHE_HOME/clifleet/last-report.json
 --dry-run is appended to history.jsonl next to it (clifleet history).
 With a pipe, use set -o pipefail so tee does not hide a failed upgrade.
 
---dry-run still connects, so the printed command matches the install
-method on disk, but it does not run the upgrade.
+The table lists only the rows where something happened or needs attention
+(applied, staged, failed, blocked, and dry-run rows that would act). Rows
+that were left alone (up to date, not installed, no-stage, skipped) are
+counted on one "Not shown" line; --long prints every row.
+
+--dry-run still connects, so the plan matches the install method on disk,
+but it does not run the upgrade. The table says what would happen (would
+fetch → 0.166.0, would apply); the shell commands are in --long, -v, and
+--json.
+
+While a fetch or apply runs, stderr shows one line when each tool starts
+and ends, and "✓ host (3/4)" when a host is done.
 
 Before fetching, clifleet asks (from this machine, once per tool) for the
 newest version on the channel fetch would download from. A tool whose
@@ -228,6 +247,7 @@ Flags:
       --apply            Install from the staged cache
       --one-shot         Run native updaters in place instead of fetch-then-swap
       --no-latest        Fetch every stageable tool without checking the newest version
+      --long             Print every row, including the ones left alone
       --dry-run
       --json
   -v, --verbose
@@ -350,11 +370,12 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 		help = upgradeHelp
 		name = "upgrade"
 	}
-	var dry, jsonOut, verbose, fetch, apply, oneShot, noLatest bool
+	var dry, jsonOut, verbose, fetch, apply, oneShot, noLatest, long bool
 	opt, fs, err := parseFlags(args, stderr, help, func(fs *flag.FlagSet) {
 		fs.BoolVar(&dry, "dry-run", false, "do not change hosts")
 		fs.BoolVar(&noLatest, "no-latest", false, "do not look up the newest versions")
 		fs.BoolVar(&jsonOut, "json", false, "print JSON")
+		fs.BoolVar(&long, "long", false, "print one row per host and tool")
 		fs.BoolVar(&verbose, "verbose", false, "show remote output")
 		fs.BoolVar(&verbose, "v", false, "show remote output")
 		if upgrade {
@@ -448,18 +469,21 @@ func cmdFleet(args []string, stdout, stderr io.Writer, upgrade bool) int {
 		}
 		return 0
 	}
-	lines := report.Lines()
-	if len(lines) == 0 {
-		fmt.Fprintln(stdout, "no tools to check on the selected hosts")
+	if upgrade {
+		printUpgrade(stdout, report, long, verbose, colorEnabled(stdout))
 	} else {
-		fmt.Fprintln(stdout, table.Render(report.Header(), lines, colorEnabled(stdout)))
+		printStatus(stdout, report, long, termWidth(stdout), colorEnabled(stdout))
 	}
-	fmt.Fprintln(stdout, report.Summary())
 	if upgrade && phase == fleet.PhaseUpgrade && !oneShot && reportHasNoStage(report) {
 		fmt.Fprintln(stderr, noStageTip)
 	}
 	for _, e := range report.Errors() {
 		fmt.Fprintf(stderr, "%s\n", e)
+	}
+	if isTerm(stderr) {
+		for _, hint := range nextHints(report, phase, oneShot) {
+			fmt.Fprintln(stderr, hint)
+		}
 	}
 	if verbose {
 		for _, h := range report.Hosts {

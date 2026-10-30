@@ -58,6 +58,7 @@ type Options struct {
 	Phase      string
 	OneShot    bool
 	OnProgress func(string)
+	done       *hostCounter
 	// Latest returns the newest version on a channel, or "" when unknown.
 	// nil skips the lookup: no LATEST column, and fetch downloads every
 	// stageable tool.
@@ -86,6 +87,8 @@ type Row struct {
 	Command    string `json:"command,omitempty"`
 	Installed  *bool  `json:"installed,omitempty"`
 	Failed     bool   `json:"-"`
+	// NoStage is set on status rows whose tool only --one-shot can update.
+	NoStage bool `json:"-"`
 }
 
 // HostResult is one machine.
@@ -105,6 +108,8 @@ type Report struct {
 	DryRun  bool         `json:"dry_run"`
 	OK      bool         `json:"ok"`
 	Hosts   []HostResult `json:"hosts"`
+	// OneShot is set for upgrade --one-shot; the JSON does not carry it.
+	OneShot bool `json:"-"`
 }
 
 type plan struct {
@@ -191,28 +196,28 @@ func (r Report) Summary() string {
 	}
 	failed := failedPhrase(failedTools, failedHosts)
 	if r.Phase == PhaseFetch && r.DryRun {
-		return fmt.Sprintf("dry-run · %d %s · %d would stage · %d blocked · %d no-stage · %d skipped · %s",
-			hosts, hostWord, would, blocked, nostage, skipped+missing, failed)
+		return fmt.Sprintf("dry-run · %d %s · %d would stage · %d blocked · %d no-stage · %d skipped · %d not installed · %s",
+			hosts, hostWord, would, blocked, nostage, skipped, missing, failed)
 	}
 	if r.Phase == PhaseFetch {
-		return fmt.Sprintf("%d %s · %d staged · %d blocked · %d no-stage · %d skipped · %s",
-			hosts, hostWord, staged, blocked, nostage, skipped+missing, failed)
+		return fmt.Sprintf("%d %s · %d staged · %d blocked · %d no-stage · %d skipped · %d not installed · %s",
+			hosts, hostWord, staged, blocked, nostage, skipped, missing, failed)
 	}
 	if r.Phase == PhaseApply && r.DryRun {
-		return fmt.Sprintf("dry-run · %d %s · %d would apply · %d blocked · %d no-stage · %d skipped · %s",
-			hosts, hostWord, would, blocked, nostage, skipped+missing, failed)
+		return fmt.Sprintf("dry-run · %d %s · %d would apply · %d blocked · %d no-stage · %d skipped · %d not installed · %s",
+			hosts, hostWord, would, blocked, nostage, skipped, missing, failed)
 	}
 	if r.Phase == PhaseApply {
-		return fmt.Sprintf("%d %s · %d applied · %d up to date · %d blocked · %d no-stage · %d skipped · %s",
-			hosts, hostWord, applied, current, blocked, nostage, skipped+missing, failed)
+		return fmt.Sprintf("%d %s · %d applied · %d up to date · %d blocked · %d no-stage · %d skipped · %d not installed · %s",
+			hosts, hostWord, applied, current, blocked, nostage, skipped, missing, failed)
 	}
 	if r.Command == "upgrade" && r.DryRun {
-		return fmt.Sprintf("dry-run · %d %s · %d would upgrade · %d no-stage · %d blocked · %d skipped · %s",
-			hosts, hostWord, would, nostage, blocked, skipped+missing, failed)
+		return fmt.Sprintf("dry-run · %d %s · %d would upgrade · %d no-stage · %d blocked · %d skipped · %d not installed · %s",
+			hosts, hostWord, would, nostage, blocked, skipped, missing, failed)
 	}
 	if r.Command == "upgrade" {
-		return fmt.Sprintf("%d %s · %d upgraded · %d up to date · %d no-stage · %d blocked · %d skipped · %s",
-			hosts, hostWord, upgraded+applied, current, nostage, blocked, skipped+missing, failed)
+		return fmt.Sprintf("%d %s · %d upgraded · %d up to date · %d no-stage · %d blocked · %d skipped · %d not installed · %s",
+			hosts, hostWord, upgraded+applied, current, nostage, blocked, skipped, missing, failed)
 	}
 	if current+behind > 0 {
 		return fmt.Sprintf("%d %s · %d installed · %d update available · %d not installed · %s",
@@ -279,10 +284,12 @@ func runFleet(ctx context.Context, cfg config.Loaded, opt Options, run runner.Ru
 		command = "upgrade"
 	}
 	report := Report{Command: command, DryRun: opt.DryRun, Hosts: make([]HostResult, len(hosts))}
+	report.OneShot = upgrade && opt.OneShot
 	if upgrade && opt.phase() != PhaseUpgrade {
 		report.Phase = opt.phase()
 	}
 	overlays := overlaysFrom(cfg)
+	opt.done = &hostCounter{total: len(hosts)}
 
 	sem := make(chan struct{}, parallel)
 	var wg sync.WaitGroup
@@ -324,6 +331,9 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 	result := HostResult{Name: host.Name, Destination: dest, Local: host.Local}
 	names := catalog.Candidates(cfg.Tools, catalog.HostPolicy{Tools: host.Tools, Skip: host.Skip}, opt.Only)
 	if len(names) == 0 {
+		if opt.done != nil {
+			opt.done.next()
+		}
 		return result
 	}
 	if !upgrade && opt.DryRun {
@@ -340,14 +350,10 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 		tools[i] = probe.Tool{Name: specs[i].Name, Binary: specs[i].Binary}
 	}
 
-	if timeout > 0 {
-		progress(opt, "→ %s (%s)", host.Name, timeout.Round(time.Second))
-	} else {
-		progress(opt, "→ %s", host.Name)
-	}
+	progress(opt, "→ %s", host.Name)
 	script, err := probe.ProbeScript(tools, host.PathExtra)
 	if err != nil {
-		progress(opt, "✗ %s  %s", host.Name, err.Error())
+		hostDone(opt, host.Name, true, err.Error())
 		return hostError(host, err.Error())
 	}
 	target := runner.Target{
@@ -356,7 +362,7 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 	}
 	stdout, stderr, err := run.Run(ctx, target, script)
 	if err != nil {
-		progress(opt, "✗ %s  %s", host.Name, err.Error())
+		hostDone(opt, host.Name, true, err.Error())
 		if errors.Is(err, runner.ErrInterrupted) {
 			// The host answered or never got asked; it is not unreachable.
 			return downRows(host, names, err.Error(), StFailed)
@@ -369,7 +375,7 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 		if line := firstLine(stderr); line != "" {
 			msg += ": " + line
 		}
-		progress(opt, "✗ %s  %s", host.Name, msg)
+		hostDone(opt, host.Name, true, msg)
 		return unreachable(host, names, msg)
 	}
 
@@ -426,12 +432,12 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 	if upgrade && !opt.DryRun && len(steps) > 0 {
 		upScript, err := probe.UpgradeScriptSteps(tools, host.PathExtra, steps)
 		if err != nil {
-			progress(opt, "✗ %s  %s", host.Name, err.Error())
+			hostDone(opt, host.Name, true, err.Error())
 			return hostError(host, err.Error())
 		}
 		upOut, upErr, err := run.Run(ctx, target, upScript)
 		if err != nil {
-			progress(opt, "✗ %s  %s", host.Name, err.Error())
+			hostDone(opt, host.Name, true, err.Error())
 			// Keep the rows of tools whose updater finished before the host error;
 			// only the ones that never reported carry the error.
 			failed := hostError(host, err.Error())
@@ -451,7 +457,7 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 		}
 		results, probed, perr := probe.ParseUpgrade(upOut)
 		if perr != nil {
-			progress(opt, "✗ %s  %s", host.Name, perr.Error())
+			hostDone(opt, host.Name, true, perr.Error())
 			failed := hostError(host, perr.Error())
 			for _, name := range names {
 				failed.Rows = append(failed.Rows, Row{Tool: name, Status: StFailed, Detail: perr.Error(), Failed: true})
@@ -471,12 +477,28 @@ func oneHost(ctx context.Context, cfg config.Loaded, host config.Host, opt Optio
 	for i, name := range names {
 		result.Rows = append(result.Rows, renderRow(name, plans[i], upgrade, opt.DryRun, exits, after))
 	}
-	if hostBad(result) {
-		progress(opt, "✗ %s", host.Name)
-	} else {
-		progress(opt, "✓ %s", host.Name)
+	hostDone(opt, host.Name, hostBad(result), "")
+	if !upgrade {
+		markNoStage(&result, plans, host.Methods)
 	}
 	return withLatest(result, plans, !upgrade)
+}
+
+// markNoStage flags the status rows that only upgrade --one-shot can move.
+func markNoStage(result *HostResult, plans []plan, overrides map[string]string) {
+	for _, p := range plans {
+		if !p.obs.Present {
+			continue
+		}
+		if catalog.PlanStage(p.spec, p.obs, overrides[p.spec.Name]).Action != catalog.ActionNoStage {
+			continue
+		}
+		for i := range result.Rows {
+			if result.Rows[i].Tool == p.spec.Name {
+				result.Rows[i].NoStage = true
+			}
+		}
+	}
 }
 
 func renderRow(name string, p plan, upgrade, dry bool, exits map[string]int, after map[string]catalog.Observation) Row {
@@ -636,6 +658,35 @@ func hostError(h config.Host, msg string) HostResult {
 	return HostResult{Name: h.Name, Destination: dest, Local: h.Local, Error: msg}
 }
 
+// hostCounter numbers finished hosts for the "✓ host (3/4)" lines.
+type hostCounter struct {
+	mu       sync.Mutex
+	n, total int
+}
+
+func (c *hostCounter) next() (int, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.n++
+	return c.n, c.total
+}
+
+// hostDone prints the closing progress line of a host.
+func hostDone(opt Options, name string, bad bool, msg string) {
+	line := "✓ " + name
+	if bad {
+		line = "✗ " + name
+	}
+	if msg != "" {
+		line += "  " + msg
+	}
+	if opt.done != nil {
+		n, total := opt.done.next()
+		line += fmt.Sprintf(" (%d/%d)", n, total)
+	}
+	progress(opt, "%s", line)
+}
+
 func progress(opt Options, format string, args ...any) {
 	if opt.OnProgress == nil {
 		return
@@ -655,7 +706,12 @@ func firstLine(s string) string {
 
 // Lines renders plain table rows in host order.
 // The LATEST column only shows when some row has a newest version.
-func (r Report) Lines() [][]string {
+func (r Report) Lines() [][]string { return r.lines(false) }
+
+// CompactLines is Lines with dry-run cells in words instead of the command.
+func (r Report) CompactLines() [][]string { return r.lines(true) }
+
+func (r Report) lines(words bool) [][]string {
 	withLatest := r.hasLatest()
 	var out [][]string
 	for _, h := range r.Hosts {
@@ -679,7 +735,9 @@ func (r Report) Lines() [][]string {
 			status := row.Status
 			switch row.Status {
 			case StDryRun:
-				if row.Detail != "" {
+				if words {
+					status = r.wouldSay(row)
+				} else if row.Detail != "" {
 					status = "dry-run: " + row.Detail
 				}
 			case StSkipped, StFailed, StNoStage, StStaged, StApplied, StUnreachable, StBlocked:
