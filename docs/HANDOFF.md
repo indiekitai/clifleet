@@ -165,6 +165,8 @@ Left, none started (from the code review, `docs/reviews/2026-10-29-代码审查.
    - An `--apply` dry run only probes, so it cannot see which tools have a stamp; its rows say `would apply if staged`. Proper fix: the probe emits a `staged` line per tool (stamp version), the parser and `renderStageRow` use it, and dry-run shows `would apply <old> → <new>` or folds the row.
    - dry-run promises to stage claw1 openclaw, but the Node engines check only runs at fetch, so the real run says `blocked`; dry-run should run the same preflight or say "may be blocked".
    - mac-studio opencode (`anomalyco/tap/opencode-v2`, not in the formulae.brew.sh API, so no LATEST) runs `brew update && brew fetch` every time even when current.
+4. From Fan's v0.2.6 fetch (2026-10-30): a `staged` row spells out the cache path (`staged (/Users/tf/.cache/clifleet/npm/codex/openai-codex-0.166.0.tgz)`, `staged (brew cache (formula opencode-v2))`), which makes the table wide and says nothing the user needs. Show `staged → 0.166.0` (or plain `staged` when the version is unknown); keep the path for `--long` / `--json`. mbp codex (native, 166 MB) timed out at the 580 s release cap: GitHub runs ~258 KB/s direct from mbp (~11 min), while the Cursor CDN took 5 s; retry with `--timeout 20m`, not a product fix (Fan's call on slow hosts).
+
 9. Smaller: `hostRun` struct for the shared parameters of `finishStage` / `finishSafe` / `runStageSteps` / `oneHost`; an AGENTS.md pointing Codex at CLAUDE.md.
 
 ## Suggested first week for the next maintainer
