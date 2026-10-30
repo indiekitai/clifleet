@@ -167,6 +167,8 @@ Left, none started (from the code review, `docs/reviews/2026-10-29-代码审查.
    - mac-studio opencode (`anomalyco/tap/opencode-v2`, not in the formulae.brew.sh API, so no LATEST) runs `brew update && brew fetch` every time even when current.
 4. From Fan's v0.2.6 fetch (2026-10-30): a `staged` row spells out the cache path (`staged (/Users/tf/.cache/clifleet/npm/codex/openai-codex-0.166.0.tgz)`, `staged (brew cache (formula opencode-v2))`), which makes the table wide and says nothing the user needs. Show `staged → 0.166.0` (or plain `staged` when the version is unknown); keep the path for `--long` / `--json`. mbp codex (native, 166 MB) timed out at the 580 s release cap: GitHub runs ~258 KB/s direct from mbp (~11 min), while the Cursor CDN took 5 s; retry with `--timeout 20m`, not a product fix (Fan's call on slow hosts).
 
+5. **npm apply downloads the dependencies (dsh timed out on mac-studio and mbp, 2026-10-30 v0.2.6 apply).** Fetch only `npm pack`s the main tarball (dsh: 25 KB); apply then runs `npm install -g --prefix <tmp>` from the registry, which for dsh is 618 packages / 853 MB (54 s on mac-studio alone), then `cp -a` 853 MB to the install filesystem (27 s), all under the fixed 180 s apply cap that `--timeout` cannot raise. Both hosts were left intact on rc.2, no `.clifleet-dsh-*` leftovers. Fix: fetch warms the npm cache (full install into a temp prefix, then removed) so apply installs with `--prefer-offline`, and the npm apply cap grows with the host budget like fetch.
+
 9. Smaller: `hostRun` struct for the shared parameters of `finishStage` / `finishSafe` / `runStageSteps` / `oneHost`; an AGENTS.md pointing Codex at CLAUDE.md.
 
 ## Suggested first week for the next maintainer
