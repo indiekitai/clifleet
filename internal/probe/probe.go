@@ -27,6 +27,18 @@ const scriptPrelude = `# clifleet remote helper. POSIX sh.
 set -f
 unset CDPATH
 PATH=${PATH:-/usr/bin:/bin}
+# Terminal apps put per-session wrapper scripts named after the CLIs ahead of
+# them (cmux: ~/.cmuxterm/cmux-cli-shims/<id>/amp). They are not installs.
+cf_p_new=
+IFS=:
+for cf_p_dir in $PATH; do
+  case $cf_p_dir in
+    */cmux-cli-shims|*/cmux-cli-shims/*) continue ;;
+  esac
+  cf_p_new=${cf_p_new:+$cf_p_new:}$cf_p_dir
+done
+unset IFS
+PATH=${cf_p_new:-/usr/bin:/bin}
 export PATH
 
 prepend() {

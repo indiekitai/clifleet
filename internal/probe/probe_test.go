@@ -673,3 +673,39 @@ wait 2>/dev/null
 		t.Fatalf("KILL reached a process that only reused a PID:\n%s", out)
 	}
 }
+
+// A cmux session puts wrapper scripts named amp, claude, … first on PATH. The
+// probe must look past them: a tool with only a wrapper is not installed, and
+// one with a real binary further down is reported at that binary.
+func TestProbeSkipsTerminalShims(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	shims := filepath.Join(home, ".cmuxterm", "cmux-cli-shims", "C4EA47FA")
+	bin := filepath.Join(root, "bin")
+	for _, d := range []string{shims, bin} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExe(t, filepath.Join(shims, "amp"), "#!/bin/sh\nprintf 'shim\\n'\n")
+	writeExe(t, filepath.Join(shims, "claude"), "#!/bin/sh\nprintf 'shim\\n'\n")
+	writeExe(t, filepath.Join(bin, "claude"), "#!/bin/sh\nprintf '2.1.314 (Claude Code)\\n'\n")
+	script, err := ProbeScript([]Tool{{Name: "amp", Binary: "amp"}, {Name: "claude", Binary: "claude"}}, []string{bin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := runSh(t, script, []string{"PATH=" + shims + ":" + bin + ":/usr/bin:/bin", "HOME=" + home})
+	obs, err := ParseProbe(out)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if obs["amp"].Present {
+		t.Fatalf("amp shim reported as installed: %+v", obs["amp"])
+	}
+	if c := obs["claude"]; !c.Present || c.Path != filepath.Join(bin, "claude") {
+		t.Fatalf("claude %+v", c)
+	}
+}
