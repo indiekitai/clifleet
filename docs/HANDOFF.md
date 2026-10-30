@@ -114,7 +114,24 @@ Fan ran `upgrade --fetch` then `--apply` himself. It surfaced four bugs, all fix
 - claw1 claude sits behind a root-owned `/usr/local/bin/claude` → `~/.local/bin/claude` → `versions/`; apply tried to retarget the root link. Now it follows the chain to the link that points into `versions/` (`cf_versions_link`, same for Cursor Agent).
 - Prereleases compared equal (dsh 0.2.1-rc.2 vs rc.5). Apply now compares the full version (`cf_semver_full`, `cf_ver_cmp`).
 
-Stale stamps from that run were deleted by hand (Fan OKed): mac-studio `claude`, `agent`, `cursor-agent`; mbp `opencode`, `pi`; claw1 `agent`, `cursor-agent`, `opencode`. Fresh stamps left for the next `--apply`: mac-studio `dsh`, `opencode`; mbp `claude`, `cursor-agent`, `dsh`; claw1 `claude` (2.1.314, the root-link case), `codex`, `openclaw`. Not yet applied with v0.2.4 (needs Fan's timing OK): claw1 claude 2.1.312 → 2.1.314, codex 0.165.0 → 0.166.0 (npm, mac-studio / claw1; mbp is native), dsh rc.2 → rc.5. Cause of the exit 137 itself (staged claude 2.1.312 killed on mac-studio) is unknown.
+Stale stamps from that run were deleted by hand (Fan OKed): mac-studio `claude`, `agent`, `cursor-agent`; mbp `opencode`, `pi`; claw1 `agent`, `cursor-agent`, `opencode`. Fresh stamps left for the next `--apply`: mac-studio `dsh`, `opencode`; mbp `claude`, `cursor-agent`, `dsh`; claw1 `claude` (2.1.314, the root-link case), `codex`, `openclaw`. Cause of the exit 137 itself (staged claude 2.1.312 killed on mac-studio) is unknown.
+
+## Fan's second run (2026-10-30 evening, v0.2.6)
+
+`upgrade --fetch` then `--apply`, run by Fan:
+
+- Applied: claw1 claude 2.1.312 → **2.1.314** (the root-link fix, first real proof), codex 0.165.0 → **0.166.0** on mac-studio and claw1 (npm platform nesting, first real proof), mac-studio opencode (brew tap `opencode-v2`).
+- dsh failed `timed out` at apply on mac-studio and mbp; both left intact on rc.2, no leftovers. Fixed in v0.2.7 (npm fetch warms the cache), **not yet re-run on the fleet**.
+- mbp codex (native, 166 MB) timed out at fetch: GitHub ~258 KB/s direct from mbp. Not a product bug.
+- claw1 openclaw still `blocked` by Node v22.23.4 (host).
+
+Fleet now (status, end of 2026-10-30): claude 2.1.314 everywhere; codex 0.166.0 on mac-studio / claw1, 0.165.0 on mbp (fetch timed out) and omarchy (mise, host-managed); dsh rc.2 on mac-studio / mbp / omarchy (LATEST rc.5); one-shot-only behind: kimi, qwen (mac-studio), pi (omarchy).
+
+## Next session (Fan stopped 2026-10-30 evening, "明天再继续")
+
+1. Fan runs `clifleet upgrade --fetch --only dsh` then `--apply --only dsh` with v0.2.7 (first real check of the npm cache warm; mbp may need `--timeout 20m` on the fetch). Read his pasted output; fix whatever row fails.
+2. Optional, Fan's call: `clifleet upgrade --fetch --hosts mbp --only codex --timeout 20m`, then apply; Node ≥ 24.22.1 on claw1 for openclaw.
+3. Then the remaining Backlog item 4 (staged rows print the cache path; show `staged → <version>`) and the item 3 leftovers (apply dry-run cannot see stamps, dry-run engines preflight, tap formula LATEST). Fan's pattern: UX issues found while trying are batched until he is done trying; real bugs are fixed and released right away (he said "不用问我，可以发版").
 
 ## Open gaps (product vs host)
 
