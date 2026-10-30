@@ -34,7 +34,7 @@ Checked against `origin/main` on 2026-10-29 (Asia/Tokyo). Tip SHA, PR #2–#4 su
   - `cb11ca0`: every recursive delete in remote scripts goes through `cf_rmtree`, which refuses empty, relative, `.`/`..`, `/`, `$HOME` and its parents (`TestShellDeletesTreesOnlyThroughRmtree` guards it)
   - `be8527c` + tag **`v0.2.1`**: release runs the tests first, Actions pinned to commit SHAs, build provenance attestation on the tarballs and `SHA256SUMS`; `install.sh` and `clifleet update` run `gh attestation verify` when gh is logged in (`CLIFLEET_NO_ATTESTATION=1` skips). Verified end to end 2026-10-29: release green, attestation verifies, install.sh and a real v0.2.0 → v0.2.1 update on Mac Studio
   - Tag **`v0.2.2`** (2026-10-30, release green, release-check showed only the intended help changes): `clifleet history` + `history.jsonl` (every non-dry-run upgrade / fetch / apply, one line per host × tool); `skills/clifleet/SKILL.md` + `TestSkillNamesOnlyRealCommandsAndFlags`; terminal-only "newer clifleet available" notice (`CLIFLEET_NO_UPDATE_CHECK=1` off); `scripts/release-check.sh`
-  - After v0.2.2, not tagged yet: `76b136a` LATEST column in `status` and fetch skip for tools already on the newest version (`internal/latest`, `internal/semver`); then a failed fetch drops the tool's old stamp so apply cannot open a partial download
+  - Tag **`v0.2.3`** (2026-10-30, release-check showed only the intended LATEST / help changes): `76b136a` LATEST column in `status` and fetch skip for tools already on the newest version (`internal/latest`, `internal/semver`); then a failed fetch drops the tool's old stamp so apply cannot open a partial download
   - Before that: Ctrl-C is reported as `interrupted`, not `unreachable`; the kill-tree KILL trusts only PID+start time (BusyBox without `lstart` KILLs only a direct child that is still the watchdog's sibling); npm aliases keep their real package name; a staged run hit by Ctrl-C sets a host error, so it never exits 0
 - `1cad8412` — squash-merge of **PR #4** (*Harden staged apply against mise shims, keychain rollbacks, and summary counts*)
 - Prior merges worth knowing:
@@ -109,7 +109,7 @@ Host facts found 2026-10-30: mbp's proxy is set by `proxy_on` in `~/.zshrc`, whi
 | mbp Xcode / CLT vs Homebrew needing newer Xcode (seen as brew blocked) | Host | brew-channel tools (e.g. opencode) stuck | Fan upgrades Xcode on mbp |
 | mbp login keychain locked over SSH | Host | agent/`cursor-agent` version probe / some applies painful | Unlock keychain on mbp (or run apply from an unlocked GUI session) |
 | omarchy codex behind mise | Host / policy | clifleet correctly **refuses** to replace the mise binary | `mise upgrade codex` on the host (done 2026-10-30, 0.165.0) |
-| mbp downloads go direct (proxy only in `~/.zshrc`) | Host / product | Big release downloads (claude 276 MB) time out | Ask Fan: a per-host env option in `hosts.toml`, or a proxy in mbp's non-login environment |
+| mbp downloads go direct (proxy only in `~/.zshrc`) | Host | Big release downloads (claude 276 MB) time out | Not a clifleet problem (Fan, 2026-10-30): no per-host proxy / env option; a slow link is the host owner's to fix |
 | claw1 openclaw Node engines too old | Host | fetch `blocked (needs Node …)` | Upgrade Node on claw1; clifleet will not bump Node |
 
 ## Safe command cheat sheet
