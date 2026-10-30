@@ -155,7 +155,17 @@ Left, none started (from the code review, `docs/reviews/2026-10-29-代码审查.
    - mbp agent and cursor-agent (version unreadable, keychain locked) would each download the same ~180 MB Cursor package: an unreadable version cannot skip, and the two aliases do not share the download.
    - mac-studio opencode (`anomalyco/tap/opencode-v2`, no LATEST from the API) runs `brew update && brew fetch` every time even when current.
 7. npm fetch is capped at a fixed 120 s (`limitSeconds` in `internal/probe/stage.go`); brew and release grow to the host timeout, npm does not, so `--timeout` cannot help it. npm Codex now packs a 147 MB platform package (`@openai/codex@<ver>-darwin-arm64`): 47 s alone on mac-studio, but it timed out in the 2026-10-30 fleet fetch while other downloads shared the link. Likely fix: let npm grow to the host timeout like the others (the cap is a hang guard, not an estimate).
-8. Smaller: `hostRun` struct for the shared parameters of `finishStage` / `finishSafe` / `runStageSteps` / `oneHost`; an AGENTS.md pointing Codex at CLAUDE.md.
+8. `upgrade --apply` should list only what this run changed or failed on (Fan, 2026-10-30): applied (`old → new`), failed / blocked with the reason, then one summary line; untouched rows (up to date, not installed, no-stage) only under `--long`.
+
+Bugs found by Fan's own 2026-10-30 fetch + apply (v0.2.3), all diagnosed, none fixed yet:
+
+- **Apply can downgrade from a stale stamp.** mac-studio claude was 2.1.314; fetch skipped it as up to date but left the 2026-10-29 stamp (2.1.312), and apply installed that, then the staged binary died with exit 137 and the link was put back. mbp opencode the same way: an old brew stamp made apply rerun `brew upgrade` (blocked again). Fix: apply refuses a staged version older than the live one; a fetch that skips a tool as current also drops its stamp.
+- **npm Codex apply cannot work.** The platform tarball's package.json is named `@openai/codex` (version `0.166.0-linux-x64`); the real install puts it under the alias `@openai/codex-linux-x64`. `cf_tarball_name` reads `@openai/codex`, so `plat_dest` is the main package dir, the new codex does not run, and it rolls back (claw1 "new package did not run; previous install restored"). Use the alias name `@openai/codex-<platform>`; the test fixtures need the real tarball naming.
+- **Claude behind a root-owned link.** claw1 PATH finds `/usr/local/bin/claude` (root, → `~/.local/bin/claude` → `versions/2.1.312`); apply tries to retarget the root link and fails ("could not retarget claude symlink"), after already publishing `versions/2.1.314`. Retarget the user-owned link in the chain that points into `versions/`.
+- **Prerelease versions compare equal.** `cf_semver_line` keeps only `X.Y.Z`, so dsh 0.2.1-rc.2 vs staged 0.2.1-rc.5 is "up to date" and never upgrades.
+- Stale stamps still on hosts after this run (as of 2026-10-30 13:20 JST): mac-studio `claude` (2.1.312), `agent`, `cursor-agent` (10-29); mbp `opencode`, `pi`; claw1 `agent`, `cursor-agent`, `opencode` (10-29).
+
+9. Smaller: `hostRun` struct for the shared parameters of `finishStage` / `finishSafe` / `runStageSteps` / `oneHost`; an AGENTS.md pointing Codex at CLAUDE.md.
 
 ## Suggested first week for the next maintainer
 
