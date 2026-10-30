@@ -177,7 +177,19 @@ clifleet history
 clifleet history --hosts us-server --only codex
 ```
 
-`status` prints one row per host and candidate. A host with no allowlist has one row for every default name; this sample is only the first few:
+`status` prints a matrix: one row per tool that is installed on at least one host, one column per host. Tools installed nowhere go on one `not installed anywhere:` line. A sample:
+
+```text
+TOOL      LATEST   laptop    us-server
+claude    2.1.44   ✓         ↑ 2.1.40
+codex     0.163.0  ·         ✓
+opencode  1.19.6   ↑ 1.19.4  ·
+kimi      1.2.0    ↑ 1.0.0*  ·
+✓ up to date · ↑ <version> behind LATEST · · not installed · * only upgrade --one-shot can update it
+not installed anywhere: agy, grok
+```
+
+A bare version means installed but the newest is unknown, `?` means the version could not be read (for example `keychain locked`), and `✗` means the host was unreachable. `--long` prints one row per host and tool instead (the layout below); so does `status` on its own when the matrix is wider than the terminal (`$COLUMNS`, else 120 on a terminal, no limit in a pipe). `--json` is unchanged.
 
 ```text
 HOST        TOOL      VERSION    LATEST     METHOD  STATUS
@@ -187,6 +199,8 @@ laptop      opencode  1.19.4     1.19.6     brew    update available
 us-server   claude    2.1.40     2.1.44     npm     update available
 us-server   codex     0.163.0    0.163.0    native  up to date
 ```
+
+In a terminal, `status` ends with a `Next:` hint when something is behind, and a fetch that staged tools says to run `upgrade --apply`. A run with failures prints a `Details:` line with a `--hosts` / `--only` retry command. None of that is printed with `--json` or into a pipe.
 
 `LATEST` is the newest version on the channel each tool was installed from: the npm registry, the Homebrew API, or the vendor's own release endpoint (the same one fetch downloads from). clifleet asks once per tool from the machine you run it on, not from the hosts, so it uses your proxy settings. A tool whose lookup fails keeps an empty `LATEST` and the status `installed`; a failed lookup never fails `status`. `--no-latest` skips the lookups.
 
@@ -226,6 +240,8 @@ clifleet upgrade --fetch    # download only
 clifleet upgrade --apply    # swap only, from the cache fetch wrote
 clifleet upgrade --one-shot # in-place updater, for tools marked no-stage
 ```
+
+`upgrade` lists only the rows where something happened or needs attention (applied, staged, failed, blocked, and dry-run rows that would act) and folds the rest into one `Not shown` line with counts; `--long` prints every row. A dry run says what would happen (`would fetch → 0.166.0`, `would apply`) and keeps the shell command for `--long`, `-v`, and `--json`. While a fetch or apply runs, stderr shows one line when each tool starts and ends, and `✓ host (3/4)` when a host finishes.
 
 `clifleet fetch` and `clifleet apply` are the same two steps. `--hosts`, `--only`, `--timeout`, `--parallel`, `--json`, and `--dry-run` work as they do on `upgrade`. `--dry-run` still connects, prints the command for the install method on disk, and does not run it. `--fetch` and `--apply` together are an error.
 

@@ -40,9 +40,9 @@ missing tool.
 
 | Question | Command |
 | --- | --- |
-| What runs where, and what is behind? | `clifleet status` (`--json` to parse; `update available` rows are behind) |
+| What runs where, and what is behind? | `clifleet status` (tool × host matrix, `↑` is behind; `--long` for one row per host and tool; `--json` to parse) |
 | Can I reach every host? | `clifleet doctor` |
-| What would an upgrade do? | `clifleet upgrade --dry-run` |
+| What would an upgrade do? | `clifleet upgrade --dry-run` (only rows that would act; `--long` shows all) |
 | Download without replacing anything | `clifleet upgrade --fetch` |
 | Swap in what was fetched | `clifleet upgrade --apply` |
 | One host or tool only | `clifleet upgrade --fetch --hosts NAME --only TOOL --timeout 20m` |
