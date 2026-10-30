@@ -147,7 +147,8 @@ Left, none started (from the code review, `docs/reviews/2026-10-29-代码审查.
 
 1. Move the remote shell out of Go strings into `go:embed` `.sh` files, then run `shellcheck -s sh` / `dash -n` / `checkbashisms` in CI.
 2. Remote lock per host: stops two concurrent applies on one machine and gives a Ctrl-C'd run's remote step a way to stop.
-3. Smaller: `hostRun` struct for the shared parameters of `finishStage` / `finishSafe` / `runStageSteps` / `oneHost`; an AGENTS.md pointing Codex at CLAUDE.md.
+3. Progress lines read like an estimate: `→ claw1 (10m0s)` is the per-host time limit, not how long it will take (Fan asked "这是什么意思？", 2026-10-30). Fan's call: drop the duration from the line, or show a running spinner / progress (hosts done out of total) in a terminal instead. Not started; ask before changing.
+4. Smaller: `hostRun` struct for the shared parameters of `finishStage` / `finishSafe` / `runStageSteps` / `oneHost`; an AGENTS.md pointing Codex at CLAUDE.md.
 
 ## Suggested first week for the next maintainer
 
