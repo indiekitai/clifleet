@@ -488,6 +488,12 @@ func limitSeconds(fetch bool, kind string, toolTimeout time.Duration) int {
 	}
 	secs := npm
 	switch kind {
+	case catalog.MethodNpm:
+		// npm Codex carries a ~150 MB platform package; the fixed cap is a
+		// hang guard, so it grows with the host budget like the others.
+		if avail > secs {
+			secs = avail
+		}
 	case catalog.MethodBrew:
 		secs = brew
 		if avail > secs {

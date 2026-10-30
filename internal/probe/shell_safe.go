@@ -174,13 +174,6 @@ cf_tarball_engines() {
   fi
 }
 
-cf_tarball_name() {
-  out=$cf_dir/name.json
-  if tar -xOf "$1" package/package.json > "$out" 2>/dev/null && [ -s "$out" ]; then
-    cf_json_string "$out" name
-  fi
-}
-
 cf_codex_npm_platform() {
   os=$(uname -s)
   arch=$(uname -m)
@@ -246,6 +239,64 @@ cf_semver_line() {
   }'
 }
 
+# cf_semver_full prints the first X.Y.Z or X.Y.Z-pre in $1. Unlike
+# cf_semver_line it keeps the prerelease, so 0.2.1-rc.2 and 0.2.1-rc.5 differ.
+cf_semver_full() {
+  printf '%s\n' "$1" | awk '{
+    for (i = 1; i <= NF; i++) {
+      t = $i
+      sub(/^[vV]/, "", t)
+      if (match(t, /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?/)) {
+        t = substr(t, RSTART, RLENGTH)
+        sub(/[.-]+$/, "", t)
+        print t
+        exit
+      }
+    }
+  }'
+}
+
+# cf_ver_cmp A B prints -1, 0 or 1 (semver order, prerelease below its
+# release), or nothing when either side is not a version.
+cf_ver_cmp() {
+  awk -v a="$1" -v b="$2" '
+    function isnum(s) { return s ~ /^[0-9]+$/ }
+    BEGIN {
+      if (a !~ /^[0-9]+\.[0-9]+\.[0-9]+(-.+)?$/ || b !~ /^[0-9]+\.[0-9]+\.[0-9]+(-.+)?$/) exit
+      ca = a; pa = ""; if ((k = index(a, "-")) > 0) { ca = substr(a, 1, k - 1); pa = substr(a, k + 1) }
+      cb = b; pb = ""; if ((k = index(b, "-")) > 0) { cb = substr(b, 1, k - 1); pb = substr(b, k + 1) }
+      split(ca, x, "."); split(cb, y, ".")
+      for (i = 1; i <= 3; i++) {
+        if (x[i] + 0 < y[i] + 0) { print -1; exit }
+        if (x[i] + 0 > y[i] + 0) { print 1; exit }
+      }
+      if (pa == pb) { print 0; exit }
+      if (pa == "") { print 1; exit }
+      if (pb == "") { print -1; exit }
+      n = split(pa, u, "."); m = split(pb, v, ".")
+      for (i = 1; i <= n && i <= m; i++) {
+        if (u[i] == v[i]) continue
+        if (isnum(u[i]) && isnum(v[i])) { print (u[i] + 0 < v[i] + 0) ? -1 : 1; exit }
+        if (isnum(u[i])) { print -1; exit }
+        if (isnum(v[i])) { print 1; exit }
+        print (u[i] < v[i]) ? -1 : 1; exit
+      }
+      print (n < m) ? -1 : 1
+    }'
+}
+
+# cf_refuse_older reports a skip and forgets the stamp when the live version
+# is newer than the staged one. A stamp outlives its fetch: the tool may have
+# updated itself since, and applying the stamp then would downgrade it.
+cf_refuse_older() {
+  cf_ro_live=$(cf_semver_full "$2")
+  cf_ro_staged=$(cf_semver_full "$3")
+  [ "$(cf_ver_cmp "$cf_ro_live" "$cf_ro_staged")" = 1 ] || return 1
+  cf_report apply "$1" skip "installed $cf_ro_live is newer than staged $cf_ro_staged"
+  cf_ro_root=$(cache_root) && cf_unstage "$cf_ro_root" "$1"
+  return 0
+}
+
 cf_node_have() {
   if ! command -v node >/dev/null 2>&1; then
     return 1
@@ -296,7 +347,7 @@ cf_cmd_semver() {
   verfile=$cf_dir/cmdver.$$
   if cf_cap 10 "$verfile" "$@"; then
     line=$(head -n 1 "$verfile" 2>/dev/null || true)
-    cf_semver_line "$line"
+    cf_semver_full "$line"
   fi
   rm -f "$verfile"
 }
@@ -336,6 +387,29 @@ cf_rb_detail() {
   else
     printf 'previous release restored\n'
   fi
+}
+
+# cf_versions_link LINK PATTERN follows a chain of links from LINK and prints
+# the one whose target is in the versions dir (PATTERN). That link is the
+# installer's own (~/.local/bin/claude); a link in front of it, such as a
+# root-owned /usr/local/bin/claude, is not ours to rewrite. Without a match
+# it prints LINK.
+cf_versions_link() {
+  cf_vl_l=$1
+  cf_vl_i=0
+  while [ "$cf_vl_i" -lt 10 ] && [ -L "$cf_vl_l" ]; do
+    cf_vl_t=$(readlink "$cf_vl_l") || break
+    case $cf_vl_t in
+      /*) ;;
+      *) cf_vl_t=$(dirname "$cf_vl_l")/$cf_vl_t ;;
+    esac
+    case $cf_vl_t in
+      *"$2"*) printf '%s\n' "$cf_vl_l"; return 0 ;;
+    esac
+    cf_vl_l=$cf_vl_t
+    cf_vl_i=$((cf_vl_i + 1))
+  done
+  printf '%s\n' "$1"
 }
 
 cf_atomic_link() {
@@ -543,10 +617,13 @@ cf_apply_npm_safe() {
       live_ver=$(cf_cmd_semver "$live_path" --version)
     fi
   fi
-  have=$(cf_semver_line "$live_ver")
-  want=$(cf_semver_line "$staged_ver")
+  have=$(cf_semver_full "$live_ver")
+  want=$(cf_semver_full "$staged_ver")
   if [ -n "$have" ] && [ "$have" = "$want" ]; then
     cf_report apply "$tool" skip "already $have"
+    return 0
+  fi
+  if cf_refuse_older "$tool" "$have" "$want"; then
     return 0
   fi
   est=$(cf_engines_status "$eng")
@@ -598,12 +675,17 @@ cf_npm_swap() {
   plat_tarball=$4
   cf_swap_err=
   cf_sw_main_existed=
-  cf_sw_plat_existed=
   prefix=$cf_dir/npm-prefix
   cf_rmtree "$prefix"
   mkdir -p "$prefix" || { cf_swap_err="could not create temp prefix"; return 1; }
+  cf_sw_plat=
   if [ -n "$plat_tarball" ] && [ "$plat_tarball" != - ] && [ -f "$plat_tarball" ]; then
-    if ! npm install -g --prefix "$prefix" --include=optional --no-fund --no-audit "$tarball" "$plat_tarball" </dev/null >&2; then
+    cf_sw_plat=1
+  fi
+  if [ -n "$cf_sw_plat" ]; then
+    # The staged platform package goes in below by hand; npm must not fetch
+    # it (or any other optional dependency) from the registry during apply.
+    if ! npm install -g --prefix "$prefix" --omit=optional --no-fund --no-audit "$tarball" </dev/null >&2; then
       cf_swap_err="npm install failed"
       return 1
     fi
@@ -618,6 +700,9 @@ cf_npm_swap() {
   if [ ! -d "$src" ]; then
     cf_swap_err="npm install did not produce the package"
     return 1
+  fi
+  if [ -n "$cf_sw_plat" ]; then
+    cf_nest_platform "$src" "$pkg" "$tarball" "$plat_tarball" || return 1
   fi
   live_root=$(npm root -g </dev/null | tail -n 1 | tr -d '\r')
   case $live_root in
@@ -656,45 +741,6 @@ cf_npm_swap() {
     fi
     return 1
   fi
-  plat_dest=
-  if [ -n "$plat_tarball" ] && [ "$plat_tarball" != - ] && [ -f "$plat_tarball" ]; then
-    plat_name=$(cf_tarball_name "$plat_tarball")
-    psrc=$prefix/lib/node_modules/$plat_name
-    if [ ! -d "$psrc" ]; then
-      psrc=$prefix/node_modules/$plat_name
-    fi
-    if [ -n "$plat_name" ] && [ -d "$psrc" ]; then
-      plat_dest=$live_root/$plat_name
-      pparent=$(dirname "$plat_dest")
-      mkdir -p "$pparent" || { cf_swap_err="could not create platform dir"; cf_swap_undo "$dest" "$tool" "$cf_sw_main_existed"; return 1; }
-      pstage=$pparent/.clifleet-plat-new
-      pprev=$pparent/.clifleet-plat-prev
-      cf_rmtree "$pstage"
-      if ! cp -a "$psrc" "$pstage"; then
-        cf_swap_err="could not stage platform package"
-        cf_swap_undo "$dest" "$tool" "$cf_sw_main_existed"
-        return 1
-      fi
-      if [ -e "$plat_dest" ] || [ -L "$plat_dest" ]; then
-        cf_sw_plat_existed=1
-        cf_rmtree "$pprev"
-        if ! mv "$plat_dest" "$pprev"; then
-          cf_rmtree "$pstage"
-          cf_swap_err="could not move platform package aside"
-          cf_swap_undo "$dest" "$tool" "$cf_sw_main_existed"
-          return 1
-        fi
-      fi
-      if ! mv "$pstage" "$plat_dest"; then
-        cf_swap_err="could not swap platform package"
-        if [ -d "$pprev" ] && [ ! -e "$plat_dest" ]; then
-          mv "$pprev" "$plat_dest" || cf_swap_err="$cf_swap_err; rollback failed, previous package left at $pprev"
-        fi
-        cf_swap_undo "$dest" "$tool" "$cf_sw_main_existed"
-        return 1
-      fi
-    fi
-  fi
   cf_link_npm_bins "$dest" "$live_bin" || true
   check=$live_bin/$tool
   if [ ! -e "$check" ] && [ ! -L "$check" ]; then
@@ -705,9 +751,6 @@ cf_npm_swap() {
       cf_swap_err="new package did not run"
       cf_swap_rb_failed=
       cf_unlink_npm_bins "$live_bin"
-      if [ -n "$plat_dest" ]; then
-        cf_swap_undo "$plat_dest" plat "$cf_sw_plat_existed"
-      fi
       cf_swap_undo "$dest" "$tool" "$cf_sw_main_existed"
       if [ -z "$cf_swap_rb_failed" ]; then
         cf_swap_err="$cf_swap_err; previous install restored"
@@ -716,10 +759,35 @@ cf_npm_swap() {
     fi
   fi
   cf_rmtree "$prev"
-  if [ -n "$plat_dest" ]; then
-    cf_rmtree "$(dirname "$plat_dest")/.clifleet-plat-prev"
-  fi
   return 0
+}
+
+# cf_nest_platform PKGDIR PKG MAIN_TARBALL PLAT_TARBALL unpacks the Codex
+# platform package where npm itself puts it: under the main package, named by
+# its optionalDependencies alias (@openai/codex-darwin-arm64). The tarball's
+# own package.json says "@openai/codex", so its name cannot be used. The
+# platform rides along with the main package, so one swap and one rollback
+# cover both.
+cf_nest_platform() {
+  cf_np_dir=$1
+  cf_np_main=$(cf_tarball_version "$3")
+  cf_np_ver=$(cf_tarball_version "$4")
+  cf_np_plat=${cf_np_ver#"$cf_np_main"-}
+  case $cf_np_main:$cf_np_plat in
+    :*|*:"$cf_np_ver") cf_swap_err="platform package does not match the main package"; return 1 ;;
+  esac
+  case $cf_np_plat in
+    darwin-arm64|darwin-x64|linux-arm64|linux-x64) ;;
+    *) cf_swap_err="unknown Codex platform package $cf_np_ver"; return 1 ;;
+  esac
+  cf_np_dest=$cf_np_dir/node_modules/$2-$cf_np_plat
+  cf_np_tmp=$cf_dir/plat-unpack
+  cf_rmtree "$cf_np_tmp"
+  mkdir -p "$cf_np_tmp" "$(dirname "$cf_np_dest")" || { cf_swap_err="could not create platform dir"; return 1; }
+  tar -xzf "$4" -C "$cf_np_tmp" || { cf_swap_err="could not unpack platform package"; return 1; }
+  [ -f "$cf_np_tmp/package/package.json" ] || { cf_swap_err="platform package has no package.json"; return 1; }
+  cf_rmtree "$cf_np_dest"
+  mv "$cf_np_tmp/package" "$cf_np_dest" || { cf_swap_err="could not place platform package"; return 1; }
 }
 
 # cf_link_npm_bins PKGDIR BINDIR points BINDIR at the package's bin entries
@@ -1041,6 +1109,23 @@ stage_release_claude() {
   cf_report fetch "$tool" 0 "$dest/claude"
 }
 
+# cf_reuse_cursor_agent TOOL VER OUT copies the build the other alias (agent
+# or cursor-agent: one package, two names) already fetched into this cache,
+# so a host with both does not download the same ~180 MB twice.
+cf_reuse_cursor_agent() {
+  cf_ru_other=agent
+  [ "$1" = agent ] && cf_ru_other=cursor-agent
+  cf_ru_stamp="$root/staged/$cf_ru_other"
+  [ -f "$cf_ru_stamp" ] || return 1
+  cf_ru_line=$(head -n 1 "$cf_ru_stamp" | tr -d '\r')
+  [ "$(cf_stamp_field "$cf_ru_line" 3)" = "$2" ] || return 1
+  cf_ru_src=$root/release/$cf_ru_other/agent-cli-package.tar.gz
+  [ "$(cf_stamp_field "$cf_ru_line" 4)" = "$cf_ru_src" ] || return 1
+  [ -f "$cf_ru_src" ] && [ ! -L "$cf_ru_src" ] || return 1
+  tar -tzf "$cf_ru_src" >/dev/null 2>&1 || return 1
+  cp "$cf_ru_src" "$3"
+}
+
 stage_release_agent() {
   cf_stage_cursor_agent "$1"
 }
@@ -1070,7 +1155,8 @@ cf_stage_cursor_agent() {
     *) cf_report fetch "$tool" blocked "Cursor installer did not publish a versioned download"; return 0 ;;
   esac
   url="https://downloads.cursor.com/lab/$ver/$pair/agent-cli-package.tar.gz"
-  if ! cf_download "$dest/agent-cli-package.tar.gz" "$url"; then
+  if ! cf_reuse_cursor_agent "$tool" "$ver" "$dest/agent-cli-package.tar.gz" &&
+    ! cf_download "$dest/agent-cli-package.tar.gz" "$url"; then
     cf_report fetch "$tool" 1 "could not download Cursor Agent"
     return 0
   fi
@@ -1162,13 +1248,16 @@ apply_release_codex() {
   if [ -z "$staged_ver" ]; then
     staged_ver=$(cf_cmd_semver "$extract/bin/codex" --version)
   fi
-  staged_ver=$(cf_semver_line "$staged_ver")
+  staged_ver=$(cf_semver_full "$staged_ver")
   live_ver=
   if [ -n "$live" ]; then
     live_ver=$(cf_cmd_semver "$live" --version)
   fi
   if [ -n "$staged_ver" ] && [ "$staged_ver" = "$live_ver" ]; then
     cf_report apply "$tool" current "up to date"
+    return 0
+  fi
+  if cf_refuse_older "$tool" "$live_ver" "$staged_ver"; then
     return 0
   fi
   if [ -z "$staged_ver" ]; then
@@ -1293,6 +1382,7 @@ apply_release_claude() {
     */.local/share/claude/versions/*) ;;
     *) cf_report apply "$tool" blocked "not a native Claude install: $real"; return 0 ;;
   esac
+  live=$(cf_versions_link "$live" share/claude/versions/)
   if [ ! -L "$live" ]; then
     cf_report apply "$tool" blocked "claude on PATH is not a link into the versions dir: $live"
     return 0
@@ -1308,6 +1398,9 @@ apply_release_claude() {
   live_ver=$(cf_cmd_semver "$live" --version)
   if [ -n "$live_ver" ] && [ "$live_ver" = "$ver" ]; then
     cf_report apply "$tool" current "up to date"
+    return 0
+  fi
+  if cf_refuse_older "$tool" "$live_ver" "$ver"; then
     return 0
   fi
   versions="${HOME}/.local/share/claude/versions"
@@ -1384,6 +1477,7 @@ cf_apply_cursor_agent() {
     */.local/share/cursor-agent/versions/*) ;;
     *) cf_report apply "$tool" blocked "not a Cursor Agent install: $real"; return 0 ;;
   esac
+  live=$(cf_versions_link "$live" share/cursor-agent/versions/)
   if [ ! -L "$live" ]; then
     cf_report apply "$tool" blocked "$tool on PATH is not a link into the versions dir: $live"
     return 0
@@ -1399,6 +1493,15 @@ cf_apply_cursor_agent() {
   live_tok=$(printf '%s\n' "$live_line" | sed -n 's/.*\([0-9][0-9][0-9][0-9]\.[0-9][0-9]\.[0-9][0-9]-[A-Za-z0-9][A-Za-z0-9]*\).*/\1/p' | head -n 1)
   if [ -n "$live_tok" ] && [ "$live_tok" = "$ver" ]; then
     cf_report apply "$tool" current "up to date"
+    return 0
+  fi
+  # Builds are dated (2026.10.22-27dcf5f): a newer live date means the stamp
+  # is older than what runs now.
+  cf_ca_ld=$(printf '%s' "${live_tok%%-*}" | tr -d .)
+  cf_ca_sd=$(printf '%s' "${ver%%-*}" | tr -d .)
+  if [ -n "$live_tok" ] && [ "$cf_ca_ld" -gt "$cf_ca_sd" ] 2>/dev/null; then
+    cf_report apply "$tool" skip "installed $live_tok is newer than staged $ver"
+    cf_ca_root=$(cache_root) && cf_unstage "$cf_ca_root" "$tool"
     return 0
   fi
   extract=$(cf_extract_archive "$archive") || { cf_report apply "$tool" 1 "could not extract Cursor Agent"; return 0; }
