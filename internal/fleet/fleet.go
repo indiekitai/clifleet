@@ -748,7 +748,15 @@ func (r Report) lines(words bool) [][]string {
 				} else if row.Detail != "" {
 					status = row.Status + " (" + row.Detail + ")"
 				}
-			case StSkipped, StFailed, StNoStage, StApplied, StUnreachable, StBlocked:
+			case StApplied:
+				detail := row.Detail
+				if words {
+					detail = artifactNote(detail)
+				}
+				if detail != "" {
+					status = row.Status + " (" + detail + ")"
+				}
+			case StSkipped, StFailed, StNoStage, StUnreachable, StBlocked:
 				if row.Detail != "" {
 					status = row.Status + " (" + row.Detail + ")"
 				}

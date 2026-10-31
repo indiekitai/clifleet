@@ -275,10 +275,22 @@ func stagedSay(row Row) string {
 	if row.StagedVersion != "" {
 		out += " → " + row.StagedVersion
 	}
-	if _, note, ok := strings.Cut(row.Detail, "; "); ok && note != "" {
+	if note := artifactNote(row.Detail); note != "" {
 		out += " (" + note + ")"
 	}
 	return out
+}
+
+// artifactNote drops the cache path or "brew cache (…)" a fetch or apply
+// names first, keeping what follows "; ". A detail that does not start with
+// an artifact is a note already (a keychain-locked version check, brew's
+// complaint) and stays whole.
+func artifactNote(detail string) string {
+	if !strings.HasPrefix(detail, "/") && !strings.HasPrefix(detail, "brew cache (") {
+		return detail
+	}
+	_, note, _ := strings.Cut(detail, "; ")
+	return note
 }
 
 // FailedTargets lists the hosts and tools behind the failures of a run, in

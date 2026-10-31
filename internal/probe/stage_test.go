@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1450,8 +1451,27 @@ func TestReleaseFetchLimitTracksToolBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(brew, "cf_limit 180 stage_brew") {
-		t.Fatal("default brew fetch cap should stay 180s")
+	if !strings.Contains(brew, "cf_limit 180 stage_brew") || !strings.Contains(brew, "cf_limit 90 brew update") {
+		t.Fatal("default brew fetch cap should stay 180s after a 90s brew update")
+	}
+	// mbp 2026-10-31: a 20m budget gave brew fetch 1180s after a 90s brew
+	// update, so SSH killed the script before the cap could say timed out.
+	for _, budget := range []time.Duration{20 * time.Minute, 10 * time.Minute, 45 * time.Second} {
+		script, err := FetchScriptBudget(nil, []StageStep{{
+			Tool: "opencode", Kind: catalog.MethodBrew, BrewKind: "formula", BrewToken: "opencode",
+		}}, budget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		update := brewUpdateSeconds(budget)
+		fetchCap := limitSeconds(true, catalog.MethodBrew, budget-time.Duration(update)*time.Second)
+		if !strings.Contains(script, fmt.Sprintf("cf_limit %d brew update", update)) ||
+			!strings.Contains(script, fmt.Sprintf("cf_limit %d stage_brew", fetchCap)) {
+			t.Fatalf("%s: caps not in script (update %d, fetch %d)", budget, update, fetchCap)
+		}
+		if update+fetchCap >= int(budget.Seconds()) {
+			t.Fatalf("%s: brew update %ds + fetch %ds reach the host budget", budget, update, fetchCap)
+		}
 	}
 	apply, err := ApplyScript([]Tool{{Name: "codex", Binary: "codex"}}, nil, []StageStep{step})
 	if err != nil {

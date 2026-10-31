@@ -162,8 +162,16 @@ func timeoutMessage(target Target, stdout, stderr string) string {
 	return msg
 }
 
+// tail is the last n stderr lines without clifleet's own marker line, which
+// says only that the script started and is already in the message.
 func tail(s string, n int) string {
-	s = strings.TrimSpace(s)
+	var keep []string
+	for _, l := range strings.Split(strings.TrimSpace(s), "\n") {
+		if strings.TrimSpace(l) != "clifleet-script/1" {
+			keep = append(keep, l)
+		}
+	}
+	s = strings.TrimSpace(strings.Join(keep, "\n"))
 	if s == "" {
 		return ""
 	}

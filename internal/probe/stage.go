@@ -360,9 +360,15 @@ printf '%s\n' 'clifleet-fetch/1'
 		// runs under cf_limit, which is a subshell and would not see an update
 		// performed inside another tool. A failed or capped update does not
 		// skip fetch: the bottles already on disk may still install.
-		b.WriteString(`if command -v brew >/dev/null 2>&1; then
+		// The update comes out of the host budget, so the fetch cap after it
+		// still ends before SSH does and can report its own timeout.
+		update := brewUpdateSeconds(toolTimeout)
+		if toolTimeout > 0 {
+			toolTimeout -= time.Duration(update) * time.Second
+		}
+		fmt.Fprintf(&b, `if command -v brew >/dev/null 2>&1; then
   rc=0
-  cf_limit 90 brew update >"$cf_dir/brew-update.log" 2>&1 || rc=$?
+  cf_limit %d brew update >"$cf_dir/brew-update.log" 2>&1 || rc=$?
   if [ "$rc" -eq 0 ]; then
     cf_brew_update=ok
   else
@@ -370,7 +376,7 @@ printf '%s\n' 'clifleet-fetch/1'
   fi
   export HOMEBREW_NO_AUTO_UPDATE=1
 fi
-`)
+`, update)
 	}
 	if err := writeStageCalls(&b, steps, true, toolTimeout); err != nil {
 		return "", err
@@ -457,6 +463,21 @@ func writeStageCalls(b *strings.Builder, steps []StageStep, fetch bool, toolTime
 		writeLimited(b, fetch, step.Kind, step.Tool, call, toolTimeout)
 	}
 	return nil
+}
+
+// brewUpdateSeconds caps the one brew update of a fetch script: 90s, or a
+// third of a short host budget.
+func brewUpdateSeconds(toolTimeout time.Duration) int {
+	secs := 90
+	if toolTimeout > 0 {
+		if third := int(toolTimeout.Seconds()) / 3; third < secs {
+			secs = third
+		}
+		if secs < 1 {
+			secs = 1
+		}
+	}
+	return secs
 }
 
 func fetchHasBrew(steps []StageStep) bool {

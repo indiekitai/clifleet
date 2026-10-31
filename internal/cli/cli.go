@@ -675,8 +675,10 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// latestTimeout caps each newest-version lookup.
-const latestTimeout = 10 * time.Second
+// latestTimeout caps each newest-version lookup. cursor.com took ~7s per new
+// TLS connection behind a proxy, and a missed lookup means a full download
+// of a tool that may already be current. Each query runs once per run.
+const latestTimeout = 20 * time.Second
 
 // doctorGrace is how long doctor waits past the connect timeout for ssh to
 // log in and run `true`.

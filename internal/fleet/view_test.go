@@ -184,6 +184,25 @@ func TestStagedSaysVersionNotPath(t *testing.T) {
 	}
 }
 
+func TestAppliedDropsArtifactKeepsNotes(t *testing.T) {
+	rows := []Row{
+		{Tool: "dsh", Version: "0.2.1-rc.2 → 0.2.1-rc.5", Status: StApplied, Detail: "/Users/u/.cache/clifleet/npm/dsh/deepseek-ai-dsh-0.2.1-rc.5.tgz"},
+		{Tool: "opencode", Version: "2.2.2 → 2.2.5", Status: StApplied, Detail: "brew cache (formula opencode-v2)"},
+		{Tool: "agent", Status: StApplied, Detail: "installed 2026.10.22-27dcf5f; version check skipped (macOS login keychain is locked)"},
+		{Tool: "pi", Version: "1.4.0 → 1.5.0", Status: StApplied, Detail: "brew upgrade also reported: Xcode is too old"},
+	}
+	r := Report{Command: "upgrade", Phase: PhaseApply, Hosts: []HostResult{{Name: "h", Rows: rows}}}
+	want := []string{"applied", "applied", "applied (installed 2026.10.22-27dcf5f; version check skipped (macOS login keychain is locked))", "applied (brew upgrade also reported: Xcode is too old)"}
+	for i, l := range r.CompactLines() {
+		if got := l[len(l)-1]; got != want[i] {
+			t.Fatalf("row %d: %q, want %q", i, got, want[i])
+		}
+	}
+	if long := r.Lines()[0]; !strings.Contains(long[len(long)-1], "deepseek-ai-dsh-0.2.1-rc.5.tgz") {
+		t.Fatalf("--long lost the path: %v", long)
+	}
+}
+
 func TestSummarySplitsNotInstalledFromSkipped(t *testing.T) {
 	got := upgradeReport().Summary()
 	if !strings.Contains(got, "1 skipped · 3 not installed") {

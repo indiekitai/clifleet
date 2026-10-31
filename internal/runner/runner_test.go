@@ -43,6 +43,10 @@ func TestTimeoutSaysWhetherTheScriptStarted(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "started but did not finish") {
 		t.Fatal(err)
 	}
+	_, _, err = Exec{}.Run(ctx, Target{Local: true, Timeout: time.Second}, "printf '%s\\n' clifleet-script/1 >&2\nprintf '%s\\n' clifleet-fetch/1\nsleep 5\n")
+	if err == nil || strings.Contains(err.Error(), "clifleet-script/1") {
+		t.Fatalf("timeout message repeats the script marker: %v", err)
+	}
 	if time.Since(start) > 6*time.Second {
 		t.Fatalf("timeout did not kill the process group: %s", time.Since(start))
 	}
