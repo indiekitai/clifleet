@@ -1,6 +1,6 @@
 # clifleet maintainer handoff
 
-Last updated: 2026-10-29 (Asia/Tokyo). Previous maintainer: Indiekit (Grok Bot agent). Owner: Fan Yang.
+Last updated: 2026-10-31 (Asia/Tokyo). Previous maintainer: Indiekit (Grok Bot agent). Owner: Fan Yang.
 
 ## Purpose of this file
 
@@ -39,6 +39,7 @@ Checked against `origin/main` on 2026-10-29 (Asia/Tokyo). Tip SHA, PR #2–#4 su
   - Tag **`v0.2.5`** (2026-10-30): table column widths ignore ANSI colour codes (the yellow `↑` cells had widened every status matrix column by ~9)
   - Tag **`v0.2.6`** (2026-10-30): scripts drop cmux's per-session wrapper dirs (`~/.cmuxterm/cmux-cli-shims/<id>/`) from PATH. Run from a cmux session, the local host showed amp and hermes as installed with `?` (only the wrappers exist on mac-studio); from a plain terminal they were correctly not installed
   - Tag **`v0.2.7`** (2026-10-30): npm fetch downloads the dependencies too (see Backlog 5); first real check of the v0.2.4 fixes in Fan's apply: claw1 claude 2.1.312 → 2.1.314 through the root link, npm codex 0.165.0 → 0.166.0 on mac-studio and claw1
+  - Tag **`v0.2.8`** (2026-10-31, release-check: same `status` / default dry-run output on both builds): a `staged` row says `staged → 0.166.0` instead of the cache path (`--long` / `--json` keep the path; fetch lines carry the version as a sixth CF1 field, the Codex stamp records its version); an `--apply` dry run reads each host's stamps (`CF1 staged` lines from the probe) and says `would apply → <version>`, folds tools with nothing staged or an older stamp, and shows a blocked release stamp or an npm stamp whose engines.node the host's Node misses as `blocked` (checked on the real fleet: claw1 openclaw now `blocked (needs Node …)` instead of `would apply`)
   - Before that: Ctrl-C is reported as `interrupted`, not `unreachable`; the kill-tree KILL trusts only PID+start time (BusyBox without `lstart` KILLs only a direct child that is still the watchdog's sibling); npm aliases keep their real package name; a staged run hit by Ctrl-C sets a host error, so it never exits 0
 - `1cad8412` — squash-merge of **PR #4** (*Harden staged apply against mise shims, keychain rollbacks, and summary counts*)
 - Prior merges worth knowing:
@@ -50,7 +51,7 @@ Open PRs: none at handoff time.
 
 ## Install on Fan's control machine (Mac Studio)
 
-- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.7`, updated 2026-10-30 with `clifleet update`; SHA256SUMS and attestation verified).
+- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.7`, updated 2026-10-30 with `clifleet update`; SHA256SUMS and attestation verified). `clifleet update` moves it to v0.2.8.
 - The 2026-10-29 13:31 apply report is kept as `~/.cache/clifleet/last-report-20261029-1331.json`; the 2026-10-30 apply report as `last-report-20261030-apply.json`; `last-report.json` now holds the latest status run.
 - Config: `~/.config/clifleet/hosts.toml` (timeout currently **`10m`**, concurrency `4`)
 - Cache / durable last run: `~/.cache/clifleet/last-report.json` plus `npm/`, `release/`, `staged/`
@@ -125,13 +126,13 @@ Stale stamps from that run were deleted by hand (Fan OKed): mac-studio `claude`,
 - mbp codex (native, 166 MB) timed out at fetch: GitHub ~258 KB/s direct from mbp. Not a product bug.
 - claw1 openclaw still `blocked` by Node v22.23.4 (host).
 
-Fleet now (status, end of 2026-10-30): claude 2.1.314 everywhere; codex 0.166.0 on mac-studio / claw1, 0.165.0 on mbp (fetch timed out) and omarchy (mise, host-managed); dsh rc.2 on mac-studio / mbp / omarchy (LATEST rc.5); one-shot-only behind: kimi, qwen (mac-studio), pi (omarchy).
+Fleet now (status, end of 2026-10-30): claude 2.1.314 everywhere; codex 0.166.0 on mac-studio / claw1 / omarchy (mise, host-managed), 0.165.0 on mbp (fetch timed out); dsh rc.2 on mac-studio / mbp / omarchy (LATEST rc.5); one-shot-only behind: kimi, qwen (mac-studio), pi (omarchy).
 
-## Next session (Fan stopped 2026-10-30 evening, "明天再继续")
+## Next session (Fan stopped 2026-10-30 evening, "明天再继续"; 2026-10-31 the agent shipped v0.2.8 without touching the fleet)
 
-1. Fan runs `clifleet upgrade --fetch --only dsh` then `--apply --only dsh` with v0.2.7 (first real check of the npm cache warm; mbp may need `--timeout 20m` on the fetch). Read his pasted output; fix whatever row fails.
+1. Fan runs `clifleet update`, then `clifleet upgrade --fetch --only dsh` then `--apply --only dsh` (first real check of the npm cache warm; mbp may need `--timeout 20m` on the fetch). The fetch matters: the rc.5 stamps on mac-studio and mbp (seen by the v0.2.8 apply dry run on 2026-10-31) came from the v0.2.6 fetch, which did not warm the npm cache, so applying them without a new fetch can time out the same way. Read his pasted output; fix whatever row fails.
 2. Optional, Fan's call: `clifleet upgrade --fetch --hosts mbp --only codex --timeout 20m`, then apply; Node ≥ 24.22.1 on claw1 for openclaw.
-3. Then the remaining Backlog item 4 (staged rows print the cache path; show `staged → <version>`) and the item 3 leftovers (apply dry-run cannot see stamps, dry-run engines preflight, tap formula LATEST). Fan's pattern: UX issues found while trying are batched until he is done trying; real bugs are fixed and released right away (he said "不用问我，可以发版").
+3. Then the Backlog item 3 leftovers below (fetch dry-run engines preflight, tap formula LATEST). Fan's pattern: UX issues found while trying are batched until he is done trying; real bugs are fixed and released right away (he said "不用问我，可以发版").
 
 ## Open gaps (product vs host)
 
@@ -180,10 +181,10 @@ Left, none started (from the code review, `docs/reviews/2026-10-29-代码审查.
 1. Move the remote shell out of Go strings into `go:embed` `.sh` files, then run `shellcheck -s sh` / `dash -n` / `checkbashisms` in CI.
 2. Remote lock per host: stops two concurrent applies on one machine and gives a Ctrl-C'd run's remote step a way to stop.
 3. Done in v0.2.4: progress lines, status matrix, next-step hint, readable dry-run, apply lists only what changed, npm fetch limit, shared agent / cursor-agent download, and the four trial bugs (see "Fan's trial run"). Left from the same trial:
-   - An `--apply` dry run only probes, so it cannot see which tools have a stamp; its rows say `would apply if staged`. Proper fix: the probe emits a `staged` line per tool (stamp version), the parser and `renderStageRow` use it, and dry-run shows `would apply <old> → <new>` or folds the row.
-   - dry-run promises to stage claw1 openclaw, but the Node engines check only runs at fetch, so the real run says `blocked`; dry-run should run the same preflight or say "may be blocked".
+   - Done in v0.2.8: an `--apply` dry run reads the stamps and runs the engines check on staged npm tarballs.
+   - Left: a `--fetch` (or default `upgrade`) dry run still promises to stage claw1 openclaw; the engines range is only known from the tarball. A fix needs the control machine's npm registry lookup (`internal/latest`) to also return `engines.node` and the probe to report the host's Node version; a host-side `npm view` would break the dry run's no-network rule.
    - mac-studio opencode (`anomalyco/tap/opencode-v2`, not in the formulae.brew.sh API, so no LATEST) runs `brew update && brew fetch` every time even when current.
-4. From Fan's v0.2.6 fetch (2026-10-30): a `staged` row spells out the cache path (`staged (/Users/tf/.cache/clifleet/npm/codex/openai-codex-0.166.0.tgz)`, `staged (brew cache (formula opencode-v2))`), which makes the table wide and says nothing the user needs. Show `staged → 0.166.0` (or plain `staged` when the version is unknown); keep the path for `--long` / `--json`. mbp codex (native, 166 MB) timed out at the 580 s release cap: GitHub runs ~258 KB/s direct from mbp (~11 min), while the Cursor CDN took 5 s; retry with `--timeout 20m`, not a product fix (Fan's call on slow hosts).
+4. Done in v0.2.8. From Fan's v0.2.6 fetch (2026-10-30): a `staged` row spelled out the cache path (`staged (/Users/tf/.cache/clifleet/npm/codex/openai-codex-0.166.0.tgz)`, `staged (brew cache (formula opencode-v2))`), which makes the table wide and says nothing the user needs. Show `staged → 0.166.0` (or plain `staged` when the version is unknown); keep the path for `--long` / `--json`. mbp codex (native, 166 MB) timed out at the 580 s release cap: GitHub runs ~258 KB/s direct from mbp (~11 min), while the Cursor CDN took 5 s; retry with `--timeout 20m`, not a product fix (Fan's call on slow hosts).
 
 5. Done in v0.2.7: npm fetch warms the npm cache (full install into a throwaway prefix), apply installs with `--prefer-offline`, and the npm apply cap grows with the host budget. dsh had timed out on mac-studio and mbp because apply downloaded its 618 dependencies (853 MB installed) under a fixed 180 s; a sandboxed rc.2 → rc.5 repro now takes 75 s to fetch and 59 s to apply.
 
