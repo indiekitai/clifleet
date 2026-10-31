@@ -264,6 +264,20 @@ func (r Report) wouldSay(row Row) string {
 	return verb
 }
 
+// stagedSay is the staged cell in words: the version on disk, not the cache
+// path (--long and --json keep that). A note after the path, such as a
+// failed brew update, stays.
+func stagedSay(row Row) string {
+	out := StStaged
+	if row.StagedVersion != "" {
+		out += " → " + row.StagedVersion
+	}
+	if _, note, ok := strings.Cut(row.Detail, "; "); ok && note != "" {
+		out += " (" + note + ")"
+	}
+	return out
+}
+
 // FailedTargets lists the hosts and tools behind the failures of a run, in
 // fleet order, for a retry command.
 func (r Report) FailedTargets() (hosts, tools []string) {

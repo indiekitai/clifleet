@@ -1047,12 +1047,12 @@ stage_release_codex() {
     cf_report fetch "$tool" 1 "downloaded archive is not a tarball"
     return 0
   fi
-  printf 'release\tcodex\t%s\t%s\n' "$asset" "$dest/$asset" > "$root/staged/$tool.tmp" || {
+  printf 'release\tcodex\t%s\t%s\t%s\n' "$asset" "$dest/$asset" "$ver" > "$root/staged/$tool.tmp" || {
     cf_report fetch "$tool" 1 "could not write stamp"
     return 0
   }
   mv -f "$root/staged/$tool.tmp" "$root/staged/$tool" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
-  cf_report fetch "$tool" 0 "$dest/$asset"
+  cf_report fetch "$tool" 0 "$dest/$asset" "$ver"
 }
 
 stage_release_claude() {
@@ -1106,7 +1106,7 @@ stage_release_claude() {
     return 0
   }
   mv -f "$root/staged/$tool.tmp" "$root/staged/$tool" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
-  cf_report fetch "$tool" 0 "$dest/claude"
+  cf_report fetch "$tool" 0 "$dest/claude" "$ver"
 }
 
 # cf_reuse_cursor_agent TOOL VER OUT copies the build the other alias (agent
@@ -1169,7 +1169,7 @@ cf_stage_cursor_agent() {
     return 0
   }
   mv -f "$root/staged/$tool.tmp" "$root/staged/$tool" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
-  cf_report fetch "$tool" 0 "$dest/agent-cli-package.tar.gz"
+  cf_report fetch "$tool" 0 "$dest/agent-cli-package.tar.gz" "$ver"
 }
 
 cf_read_release_stamp() {

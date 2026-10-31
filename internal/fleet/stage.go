@@ -369,6 +369,7 @@ func renderStageRow(name string, p plan, phase string, dry bool, actions map[str
 	row.Detail = res.Detail
 	if phase == PhaseFetch {
 		row.Status = StStaged
+		row.StagedVersion = probe.ShortVersion(res.Version)
 		return row
 	}
 	before := row.Version

@@ -165,6 +165,25 @@ func TestDryRunWordsKeepCommandInLong(t *testing.T) {
 	}
 }
 
+func TestStagedSaysVersionNotPath(t *testing.T) {
+	rows := []Row{
+		{Tool: "codex", Version: "0.165.0", Status: StStaged, Detail: "/home/u/.cache/clifleet/npm/codex/openai-codex-0.166.0.tgz", StagedVersion: "0.166.0"},
+		{Tool: "opencode", Version: "2.2.0", Status: StStaged, Detail: "brew cache (formula opencode-v2)"},
+		{Tool: "pi", Version: "1.4.0", Status: StStaged, Detail: "brew cache (formula pi); brew update failed, used the existing tap"},
+	}
+	r := Report{Command: "upgrade", Phase: PhaseFetch, Hosts: []HostResult{{Name: "h", Rows: rows}}}
+	want := []string{"staged → 0.166.0", "staged", "staged (brew update failed, used the existing tap)"}
+	for i, l := range r.CompactLines() {
+		if got := l[len(l)-1]; got != want[i] {
+			t.Fatalf("row %d: %q, want %q", i, got, want[i])
+		}
+	}
+	long := r.Lines()[0]
+	if got := long[len(long)-1]; !strings.Contains(got, "openai-codex-0.166.0.tgz") {
+		t.Fatalf("--long lost the path: %q", got)
+	}
+}
+
 func TestSummarySplitsNotInstalledFromSkipped(t *testing.T) {
 	got := upgradeReport().Summary()
 	if !strings.Contains(got, "1 skipped · 3 not installed") {

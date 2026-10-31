@@ -85,8 +85,10 @@ type Row struct {
 	Detail     string `json:"detail,omitempty"`
 	Path       string `json:"path,omitempty"`
 	Command    string `json:"command,omitempty"`
-	Installed  *bool  `json:"installed,omitempty"`
-	Failed     bool   `json:"-"`
+	// StagedVersion is the version a fetch put on disk, when the host said.
+	StagedVersion string `json:"staged_version,omitempty"`
+	Installed     *bool  `json:"installed,omitempty"`
+	Failed        bool   `json:"-"`
 	// NoStage is set on status rows whose tool only --one-shot can update.
 	NoStage bool `json:"-"`
 }
@@ -740,7 +742,13 @@ func (r Report) lines(words bool) [][]string {
 				} else if row.Detail != "" {
 					status = "dry-run: " + row.Detail
 				}
-			case StSkipped, StFailed, StNoStage, StStaged, StApplied, StUnreachable, StBlocked:
+			case StStaged:
+				if words {
+					status = stagedSay(row)
+				} else if row.Detail != "" {
+					status = row.Status + " (" + row.Detail + ")"
+				}
+			case StSkipped, StFailed, StNoStage, StApplied, StUnreachable, StBlocked:
 				if row.Detail != "" {
 					status = row.Status + " (" + row.Detail + ")"
 				}

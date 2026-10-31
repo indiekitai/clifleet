@@ -31,6 +31,8 @@ type ActionResult struct {
 	Blocked string
 	Current bool
 	Detail  string
+	// Version is the version a fetch staged, when the script could read it.
+	Version string
 }
 
 const fetchHeader = "clifleet-fetch/1"
@@ -56,9 +58,16 @@ cf_unstage() {
   rm -f "$1/staged/$2" "$1/staged/$2.tmp"
 }
 
+# cf_report TAG TOOL STATUS DETAIL [VERSION]. VERSION is the version a fetch
+# put on disk; it goes out as a sixth field only when set.
 cf_report() {
   detail=$(printf '%s' "$4" | tr '\t\r\n' '   ' | cut -c1-512)
-  printf 'CF1\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$detail"
+  if [ -n "${5:-}" ] && [ "${5:-}" != - ]; then
+    cf_rp_ver=$(printf '%s' "$5" | tr '\t\r\n' '   ' | cut -c1-128)
+    printf 'CF1\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$detail" "$cf_rp_ver"
+  else
+    printf 'CF1\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$detail"
+  fi
 }
 
 cf_safe_token() {
@@ -164,7 +173,7 @@ stage_npm() {
   printf 'npm\t%s\t%s\t%s\t%s\t%s\n' "$pkg" "$tarball" "$ver" "$eng" "$plat" > "$tmp" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
   mv -f "$tmp" "$root/staged/$tool" || { cf_report fetch "$tool" 1 "could not write stamp"; return 0; }
   case $est in
-    ok) cf_report fetch "$tool" 0 "$tarball" ;;
+    ok) cf_report fetch "$tool" 0 "$tarball" "$ver" ;;
     *) cf_report fetch "$tool" blocked "${est#blocked: }" ;;
   esac
 }
@@ -602,6 +611,9 @@ func parseActionLines(stdout, header, tag string) ([]ActionResult, error) {
 		res := ActionResult{Tool: fields[2]}
 		if len(fields) >= 5 {
 			res.Detail = strings.TrimSpace(fields[4])
+		}
+		if len(fields) >= 6 {
+			res.Version = strings.TrimSpace(fields[5])
 		}
 		if _, ok := seen[res.Tool]; ok {
 			return nil, fmt.Errorf("duplicate %s result for %s", tag, res.Tool)

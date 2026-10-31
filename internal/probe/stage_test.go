@@ -95,6 +95,17 @@ func TestStageScriptsStayInTheirPhase(t *testing.T) {
 	}
 }
 
+func TestParseFetchVersionField(t *testing.T) {
+	out := "clifleet-fetch/1\nCF1\tfetch\tcodex\t0\t/c/x.tgz\t0.166.0\nCF1\tfetch\tpi\t0\tbrew cache (formula pi)\n"
+	results, err := ParseFetch(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 || results[0].Version != "0.166.0" || results[0].Detail != "/c/x.tgz" || results[1].Version != "" {
+		t.Fatalf("%+v", results)
+	}
+}
+
 func TestFetchApplyNpmRoundTrip(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
@@ -173,6 +184,9 @@ exit 1
 	staged := filepath.Join(cache, "clifleet", "npm", "codex", "openai-codex-9.9.9.tgz")
 	if results[0].Detail != staged {
 		t.Fatalf("detail %q", results[0].Detail)
+	}
+	if results[0].Version != "" {
+		t.Fatalf("an unreadable tarball version must not be reported, got %q", results[0].Version)
 	}
 	body, err := os.ReadFile(staged)
 	if err != nil || string(body) != "packed\n" {
@@ -746,6 +760,9 @@ esac
 	}
 	if len(results) != 1 || results[0].Exit != 0 || results[0].Blocked != "" {
 		t.Fatalf("fetch %+v\n%s", results, out)
+	}
+	if results[0].Version != "1.2.3" {
+		t.Fatalf("staged version %q", results[0].Version)
 	}
 	logged, err := os.ReadFile(logPath)
 	if err != nil {
@@ -2772,6 +2789,9 @@ esac
 		results, err := ParseFetch(out)
 		if err != nil || len(results) != 1 {
 			t.Fatalf("fetch %v %+v\n%s", err, results, out)
+		}
+		if results[0].Exit == 0 && results[0].Version != "0.2.1-rc.5" {
+			t.Fatalf("staged version %q", results[0].Version)
 		}
 		got, err := os.ReadFile(log)
 		if err != nil {
