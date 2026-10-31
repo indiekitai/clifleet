@@ -150,7 +150,7 @@ func TestDryRunWordsKeepCommandInLong(t *testing.T) {
 	if got := last(mk(PhaseFetch, false)); got != "would fetch → 0.166.0" {
 		t.Fatal(got)
 	}
-	if got := last(mk(PhaseApply, false)); got != "would apply if staged" {
+	if got := last(mk(PhaseApply, false)); got != "would apply (staged)" {
 		t.Fatal(got)
 	}
 	if got := last(mk("", false)); got != "would upgrade → 0.166.0" {

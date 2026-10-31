@@ -10,6 +10,7 @@ import (
 	"github.com/indiekitai/clifleet/internal/catalog"
 	"github.com/indiekitai/clifleet/internal/probe"
 	"github.com/indiekitai/clifleet/internal/runner"
+	"github.com/indiekitai/clifleet/internal/semver"
 )
 
 func finishStage(ctx context.Context, result HostResult, target runner.Target, run runner.Runner, opt Options, phase string, names []string, plans []plan, staged []probe.StageStep, tools []probe.Tool, extra []string) HostResult {
@@ -315,6 +316,9 @@ func renderStageRow(name string, p plan, phase string, dry bool, actions map[str
 		row.Command = cmd.Display
 	}
 	if dry {
+		if phase == PhaseApply {
+			return applyDryRow(row, p, cmd)
+		}
 		row.Status = StDryRun
 		if cmd != nil {
 			row.Detail = cmd.Display
@@ -381,6 +385,41 @@ func renderStageRow(name string, p plan, phase string, dry bool, actions map[str
 		return row
 	}
 	row.Status = StApplied
+	return row
+}
+
+// applyDryRow is an --apply dry run of one tool, read from the stamp the
+// probe saw: nothing staged and an older stamp are skips as in the real run,
+// a blocked stamp stays blocked, and the rest would apply.
+func applyDryRow(row Row, p plan, cmd *catalog.Command) Row {
+	obs := p.obs
+	switch {
+	case !obs.Staged:
+		row.Status = StSkipped
+		row.Detail = "nothing staged"
+		return row
+	case obs.StagedBlocked != "":
+		row.Status = StBlocked
+		row.Detail = obs.StagedBlocked
+		return row
+	}
+	row.StagedVersion = obs.StagedVersion
+	if obs.StagedVersion != "" && !unreadableVersion(obs.Version) {
+		live := probe.ShortVersion(obs.Version)
+		if c, ok := semver.Compare(live, obs.StagedVersion); ok && c >= 0 {
+			if c == 0 {
+				row.Status = StCurrent
+				return row
+			}
+			row.Status = StSkipped
+			row.Detail = "installed " + live + " is newer than staged " + obs.StagedVersion
+			return row
+		}
+	}
+	row.Status = StDryRun
+	if cmd != nil {
+		row.Detail = cmd.Display
+	}
 	return row
 }
 

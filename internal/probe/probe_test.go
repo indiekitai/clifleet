@@ -709,3 +709,67 @@ func TestProbeSkipsTerminalShims(t *testing.T) {
 		t.Fatalf("claude %+v", c)
 	}
 }
+
+// The probe reads the stamps a fetch left, one field per kind, and never a
+// version it cannot trust.
+func TestProbeReadsStagedStamps(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	bin := filepath.Join(root, "bin")
+	staged := filepath.Join(home, ".cache", "clifleet", "staged")
+	for _, d := range []string{staged, bin} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stamps := map[string]string{
+		"codex":    "release\tcodex\tcodex-package-x.tar.gz\t/c/codex-package-x.tar.gz\t0.166.0\n",
+		"claude":   "release\tclaude\t2.1.314\t/c/claude\n",
+		"opencode": "brew\tformula\topencode\n",
+		"agent":    "release\tagent\tblocked\tno agent release asset for Linux/riscv64\n",
+		"pi":       "npm\t@earendil-works/pi-coding-agent\t/c/pi.tgz\t1.5.0\t-\t-\n",
+		"kimi":     "release\tcodex\tcodex-package-x.tar.gz\t/c/old.tar.gz\n",
+		"qwen":     "npm\tqwen\t/c/q.tgz\t1.0;rm\t-\t-\n",
+	}
+	var tools []Tool
+	for _, name := range []string{"codex", "claude", "opencode", "agent", "pi", "kimi", "qwen", "dsh"} {
+		writeExe(t, filepath.Join(bin, name), "#!/bin/sh\nprintf '1.0.0\\n'\n")
+		tools = append(tools, Tool{Name: name, Binary: name})
+		if body, ok := stamps[name]; ok {
+			if err := os.WriteFile(filepath.Join(staged, name), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	script, err := ProbeScript(tools, []string{bin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := runSh(t, script, []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + home})
+	obs, err := ParseProbe(out)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	want := map[string]struct {
+		staged       bool
+		ver, blocked string
+	}{
+		"codex":    {true, "0.166.0", ""},
+		"claude":   {true, "2.1.314", ""},
+		"opencode": {true, "", ""},
+		"agent":    {true, "", "no agent release asset for Linux/riscv64"},
+		"pi":       {true, "1.5.0", ""},
+		"kimi":     {true, "", ""},
+		"qwen":     {true, "", ""},
+		"dsh":      {false, "", ""},
+	}
+	for name, w := range want {
+		o := obs[name]
+		if !o.Present || o.Staged != w.staged || o.StagedVersion != w.ver || o.StagedBlocked != w.blocked {
+			t.Fatalf("%s: %+v, want %+v\n%s", name, o, w, out)
+		}
+	}
+}

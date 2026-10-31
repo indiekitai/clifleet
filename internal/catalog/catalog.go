@@ -53,6 +53,12 @@ type Observation struct {
 	BrewKind  string
 	BrewToken string
 	Package   string
+	// Staged is set when a fetch left a stamp for the tool on the host.
+	// StagedVersion is the version in it, when the stamp records one;
+	// StagedBlocked is the reason of a blocked release stamp.
+	Staged        bool
+	StagedVersion string
+	StagedBlocked string
 }
 
 // Command is a non-interactive upgrade argv. It is only meaningful when

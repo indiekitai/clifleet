@@ -454,9 +454,52 @@ func ProbeScript(tools []Tool, extraPaths []string) (string, error) {
 	if err := writeProbes(&b, tools); err != nil {
 		return "", err
 	}
+	b.WriteString(stagedFn)
+	for _, t := range tools {
+		fmt.Fprintf(&b, "probe_staged %s\n", shellquote.Quote(t.Name))
+	}
 	b.WriteString("exit 0\n")
 	return b.String(), nil
 }
+
+// stagedFn reads the stamp a fetch left for a tool, so an --apply dry run
+// can say what it would apply. It only reads. The version sits in a
+// different field per kind: npm 4, Claude / Cursor Agent 3, Codex 5; brew
+// and older Codex stamps have none. A blocked release stamp carries its
+// reason instead.
+const stagedFn = `
+probe_staged() {
+  if [ -n "${XDG_CACHE_HOME:-}" ]; then
+    cf_ps_f="$XDG_CACHE_HOME/clifleet/staged/$1"
+  elif [ -n "${HOME:-}" ]; then
+    cf_ps_f="$HOME/.cache/clifleet/staged/$1"
+  else
+    return 0
+  fi
+  [ -f "$cf_ps_f" ] && [ ! -L "$cf_ps_f" ] || return 0
+  cf_ps_line=$(head -n 1 "$cf_ps_f" 2>/dev/null | tr -d '\r')
+  cf_ps_ver=
+  cf_ps_why=
+  case $(printf '%s\n' "$cf_ps_line" | awk -F '\t' '{print $1 "/" $2 "/" $3}') in
+    npm/*) cf_ps_n=4 ;;
+    release/*/blocked)
+      cf_ps_n=
+      cf_ps_why=$(printf '%s\n' "$cf_ps_line" | awk -F '\t' '{print $4}' | tr -d '\t' | cut -c1-200)
+      [ -n "$cf_ps_why" ] || cf_ps_why=blocked
+      ;;
+    release/claude/*|release/cursor-agent/*) cf_ps_n=3 ;;
+    release/codex/*) cf_ps_n=5 ;;
+    *) cf_ps_n= ;;
+  esac
+  if [ -n "$cf_ps_n" ]; then
+    cf_ps_ver=$(printf '%s\n' "$cf_ps_line" | awk -F '\t' -v n="$cf_ps_n" '{print $n}')
+  fi
+  case $cf_ps_ver in
+    ''|-|*[!A-Za-z0-9._+-]*) cf_ps_ver= ;;
+  esac
+  printf 'CF1\tstaged\t%s\t%s\t%s\n' "$1" "$cf_ps_ver" "$cf_ps_why"
+}
+`
 
 // Step is one upgrade to run on a host, labeled by tool name.
 type Step struct {
@@ -691,6 +734,19 @@ func ParseProbe(stdout string) (map[string]catalog.Observation, error) {
 				BrewToken: fields[7],
 				Package:   fields[8],
 			}
+		case "staged":
+			o, ok := obs[fields[2]]
+			if !ok || !o.Present {
+				continue
+			}
+			o.Staged = true
+			if len(fields) > 3 {
+				o.StagedVersion = strings.TrimSpace(fields[3])
+			}
+			if len(fields) > 4 {
+				o.StagedBlocked = strings.TrimSpace(fields[4])
+			}
+			obs[fields[2]] = o
 		case "upgrade", "fetch", "apply":
 			continue
 		default:

@@ -249,8 +249,11 @@ func (r Report) wouldSay(row Row) string {
 	var verb string
 	switch {
 	case r.Phase == PhaseApply:
-		// The dry run only probes; it cannot see which tools have a stamp.
-		return "would apply if staged"
+		// The version comes from the stamp the probe read on the host.
+		if row.StagedVersion != "" {
+			return "would apply → " + row.StagedVersion
+		}
+		return "would apply (staged)"
 	case r.Phase == PhaseFetch:
 		verb = "would fetch"
 	case r.OneShot:

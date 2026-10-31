@@ -315,6 +315,7 @@ tools = ["codex"]
 `)
 	fake := &fakeRunner{probe: map[string]string{"box": probeOut(
 		withPkg(present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "0.163.0"), "@openai/codex"),
+		"CF1\tstaged\tcodex\t0.166.0\t",
 	)}}
 	report, err := Upgrade(context.Background(), cfg, Options{DryRun: true, Phase: PhaseApply}, fake)
 	if err != nil || report.Failed() {
@@ -326,6 +327,55 @@ tools = ["codex"]
 	}
 	if !strings.Contains(report.Summary(), "would apply") {
 		t.Fatal(report.Summary())
+	}
+	if got := report.CompactLines()[0]; got[len(got)-1] != "would apply → 0.166.0" {
+		t.Fatalf("apply dry-run words %v", got)
+	}
+}
+
+// An --apply dry run reads the stamps the probe saw, so it says what the
+// real apply would do instead of "would apply if staged" on every row.
+func TestApplyDryRunReadsStamps(t *testing.T) {
+	cfg := parseFleet(t, `
+[[hosts]]
+name = "box"
+ssh = "box"
+tools = ["codex", "claude", "pi", "dsh", "agent"]
+`)
+	fake := &fakeRunner{probe: map[string]string{"box": probeOut(
+		withPkg(present("codex", "/usr/local/bin/codex", "/usr/local/lib/node_modules/@openai/codex/bin/codex", "0.165.0"), "@openai/codex"),
+		present("claude", "/home/a/.local/bin/claude", "/home/a/.local/share/claude/versions/2.1.314", "2.1.314 (Claude Code)"),
+		withPkg(present("pi", "/usr/local/bin/pi", "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js", "1.4.0"), "@earendil-works/pi-coding-agent"),
+		withPkg(present("dsh", "/usr/local/bin/dsh", "/usr/local/lib/node_modules/@deepseek-ai/dsh/bin/dsh", "0.2.1-rc.2"), "@deepseek-ai/dsh"),
+		present("agent", "/home/a/.local/bin/agent", "/home/a/.local/share/cursor-agent/versions/2026.10.22-27dcf5f/cursor-agent", "2026.10.22-27dcf5f"),
+		"CF1\tstaged\tcodex\t0.166.0\t",
+		"CF1\tstaged\tclaude\t2.1.312\t",
+		"CF1\tstaged\tdsh\t0.2.1-rc.5\t",
+		"CF1\tstaged\tagent\t\tno Cursor Agent build for Linux/riscv64",
+		"CF1\tstaged\tnot-probed\t1.0.0\t",
+	)}}
+	report, err := Upgrade(context.Background(), cfg, Options{DryRun: true, Phase: PhaseApply}, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, l := range report.CompactLines() {
+		got[l[1]] = l[len(l)-1]
+	}
+	want := map[string]string{
+		"codex":  "would apply → 0.166.0",
+		"claude": "skipped (installed 2.1.314 is newer than staged 2.1.312)",
+		"pi":     "skipped (nothing staged)",
+		"dsh":    "would apply → 0.2.1-rc.5",
+		"agent":  "blocked (no Cursor Agent build for Linux/riscv64)",
+	}
+	for tool, w := range want {
+		if got[tool] != w {
+			t.Fatalf("%s: %q, want %q (all %v)", tool, got[tool], w, got)
+		}
+	}
+	if s := report.Summary(); !strings.Contains(s, "2 would apply") || !strings.Contains(s, "1 blocked") {
+		t.Fatal(s)
 	}
 }
 
