@@ -134,6 +134,14 @@ Fleet now (status, end of 2026-10-30): claude 2.1.314 everywhere; codex 0.166.0 
 2. Optional, Fan's call: `clifleet upgrade --fetch --hosts mbp --only codex --timeout 20m`, then apply; Node ≥ 24.22.1 on claw1 for openclaw.
 3. Then the Backlog item 3 leftovers below (fetch dry-run engines preflight, tap formula LATEST). Fan's pattern: UX issues found while trying are batched until he is done trying; real bugs are fixed and released right away (he said "不用问我，可以发版").
 
+## Agent's local run (2026-10-31 afternoon, v0.2.8, Fan OKed "本机跑一下")
+
+`upgrade --fetch --hosts mac-studio` then `--apply --hosts mac-studio`:
+
+- Applied: dsh 0.2.1-rc.2 → **0.2.1-rc.5** (first real proof of the v0.2.7 npm cache warm; the whole apply took 73 s), opencode 2.2.2 → **2.2.5** (brew tap). claude was already 2.1.316 (it had updated itself), codex 0.166.0 current.
+- agent and cursor-agent fetch both `failed (could not download Cursor Agent)`, and the fetch ran over 10 minutes. Both were already on the channel's build (2026.10.22-27dcf5f), so nothing should have been downloaded: the Cursor LATEST lookup had failed. From this machine every new TLS connection to cursor.com takes 5.5–6.8 s (the connect itself is 0.3 ms, so it goes through a local proxy) against the 10 s `latestTimeout`, so the lookup sometimes misses. The curl failure itself was not logged (no `-v`); a direct download right after ran at 2.3 MB/s. A rerun of `--fetch --only agent` said up to date in 6 s.
+- New backlog from this run (6 and 7 below).
+
 ## Open gaps (product vs host)
 
 | Issue | Whose problem | Impact on Fan | Likely next step |
@@ -187,6 +195,9 @@ Left, none started (from the code review, `docs/reviews/2026-10-29-代码审查.
 4. Done in v0.2.8. From Fan's v0.2.6 fetch (2026-10-30): a `staged` row spelled out the cache path (`staged (/Users/tf/.cache/clifleet/npm/codex/openai-codex-0.166.0.tgz)`, `staged (brew cache (formula opencode-v2))`), which makes the table wide and says nothing the user needs. Show `staged → 0.166.0` (or plain `staged` when the version is unknown); keep the path for `--long` / `--json`. mbp codex (native, 166 MB) timed out at the 580 s release cap: GitHub runs ~258 KB/s direct from mbp (~11 min), while the Cursor CDN took 5 s; retry with `--timeout 20m`, not a product fix (Fan's call on slow hosts).
 
 5. Done in v0.2.7: npm fetch warms the npm cache (full install into a throwaway prefix), apply installs with `--prefer-offline`, and the npm apply cap grows with the host budget. dsh had timed out on mac-studio and mbp because apply downloaded its 618 dependencies (853 MB installed) under a fixed 180 s; a sandboxed rc.2 → rc.5 repro now takes 75 s to fetch and 59 s to apply.
+
+6. From the 2026-10-31 local run: `applied` rows still spell out the artifact (`applied (/Users/tf/.cache/clifleet/npm/dsh/…tgz)`, `applied (brew cache (formula opencode-v2))`); v0.2.8 only fixed `staged`. Compact view should drop the path and keep real notes (`installed …; version check skipped …`, `brew upgrade also reported: …`).
+7. From the same run: `latestTimeout` (10 s, `internal/cli/cli.go`) is too tight for cursor.com behind a slow TLS proxy (~7 s per new connection). A missed lookup made fetch download two 180 MB Cursor Agent archives for a tool that was current. Raise it (e.g. 20 s; the resolver caches per run, so the cost is at most once per query), and consider not fetching cursor-agent again when agent's fetch of the same build just failed.
 
 9. Smaller: `hostRun` struct for the shared parameters of `finishStage` / `finishSafe` / `runStageSteps` / `oneHost`; an AGENTS.md pointing Codex at CLAUDE.md.
 
