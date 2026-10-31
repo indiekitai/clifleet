@@ -51,7 +51,7 @@ Open PRs: none at handoff time.
 
 ## Install on Fan's control machine (Mac Studio)
 
-- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.7`, updated 2026-10-30 with `clifleet update`; SHA256SUMS and attestation verified). `clifleet update` moves it to v0.2.8.
+- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.7`, updated 2026-10-30 with `clifleet update`; SHA256SUMS and attestation verified). Moved to v0.2.8 on 2026-10-31 with `clifleet update` (SHA256SUMS and attestation verified).
 - The 2026-10-29 13:31 apply report is kept as `~/.cache/clifleet/last-report-20261029-1331.json`; the 2026-10-30 apply report as `last-report-20261030-apply.json`; `last-report.json` now holds the latest status run.
 - Config: `~/.config/clifleet/hosts.toml` (timeout currently **`10m`**, concurrency `4`)
 - Cache / durable last run: `~/.cache/clifleet/last-report.json` plus `npm/`, `release/`, `staged/`
@@ -130,7 +130,7 @@ Fleet now (status, end of 2026-10-30): claude 2.1.314 everywhere; codex 0.166.0 
 
 ## Next session (Fan stopped 2026-10-30 evening, "明天再继续"; 2026-10-31 the agent shipped v0.2.8 without touching the fleet)
 
-1. Fan runs `clifleet update`, then `clifleet upgrade --fetch --only dsh` then `--apply --only dsh` (first real check of the npm cache warm; mbp may need `--timeout 20m` on the fetch). The fetch matters: the rc.5 stamps on mac-studio and mbp (seen by the v0.2.8 apply dry run on 2026-10-31) came from the v0.2.6 fetch, which did not warm the npm cache, so applying them without a new fetch can time out the same way. Read his pasted output; fix whatever row fails.
+1. Fan runs `clifleet upgrade --fetch --only dsh` then `--apply --only dsh` (first real check of the npm cache warm; mbp may need `--timeout 20m` on the fetch). The fetch matters: the rc.5 stamps on mac-studio and mbp (seen by the v0.2.8 apply dry run on 2026-10-31) came from the v0.2.6 fetch, which did not warm the npm cache, so applying them without a new fetch can time out the same way. Read his pasted output; fix whatever row fails.
 2. Optional, Fan's call: `clifleet upgrade --fetch --hosts mbp --only codex --timeout 20m`, then apply; Node ≥ 24.22.1 on claw1 for openclaw.
 3. Then the Backlog item 3 leftovers below (fetch dry-run engines preflight, tap formula LATEST). Fan's pattern: UX issues found while trying are batched until he is done trying; real bugs are fixed and released right away (he said "不用问我，可以发版").
 
