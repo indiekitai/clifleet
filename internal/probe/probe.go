@@ -454,6 +454,7 @@ func ProbeScript(tools []Tool, extraPaths []string) (string, error) {
 	if err := writeProbes(&b, tools); err != nil {
 		return "", err
 	}
+	b.WriteString(rangeShell)
 	b.WriteString(stagedFn)
 	for _, t := range tools {
 		fmt.Fprintf(&b, "probe_staged %s\n", shellquote.Quote(t.Name))
@@ -466,7 +467,8 @@ func ProbeScript(tools []Tool, extraPaths []string) (string, error) {
 // can say what it would apply. It only reads. The version sits in a
 // different field per kind: npm 4, Claude / Cursor Agent 3, Codex 5; brew
 // and older Codex stamps have none. A blocked release stamp carries its
-// reason instead.
+// reason instead, and so does an npm stamp whose engines.node this host's
+// Node does not meet (apply would refuse it the same way).
 const stagedFn = `
 probe_staged() {
   if [ -n "${XDG_CACHE_HOME:-}" ]; then
@@ -493,6 +495,22 @@ probe_staged() {
   esac
   if [ -n "$cf_ps_n" ]; then
     cf_ps_ver=$(printf '%s\n' "$cf_ps_line" | awk -F '\t' -v n="$cf_ps_n" '{print $n}')
+  fi
+  if [ "$cf_ps_n" = 4 ]; then
+    cf_ps_eng=$(printf '%s\n' "$cf_ps_line" | awk -F '\t' '{print $5}' | tr -d '\t')
+    case $cf_ps_eng in
+      ''|-) ;;
+      *)
+        if command -v node >/dev/null 2>&1 && cf_cap 5 "$cf_dir/staged-node" node --version; then
+          cf_ps_node=$(head -n 1 "$cf_dir/staged-node" | tr -d '\r\t')
+          if [ "$(cf_range_result "$cf_ps_node" "$cf_ps_eng")" = no ]; then
+            cf_ps_why="needs Node $cf_ps_eng (have $cf_ps_node)"
+          fi
+        elif ! command -v node >/dev/null 2>&1; then
+          cf_ps_why="needs Node $cf_ps_eng (node not on PATH)"
+        fi
+        ;;
+    esac
   fi
   case $cf_ps_ver in
     ''|-|*[!A-Za-z0-9._+-]*) cf_ps_ver= ;;

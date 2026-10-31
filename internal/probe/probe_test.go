@@ -733,9 +733,12 @@ func TestProbeReadsStagedStamps(t *testing.T) {
 		"pi":       "npm\t@earendil-works/pi-coding-agent\t/c/pi.tgz\t1.5.0\t-\t-\n",
 		"kimi":     "release\tcodex\tcodex-package-x.tar.gz\t/c/old.tar.gz\n",
 		"qwen":     "npm\tqwen\t/c/q.tgz\t1.0;rm\t-\t-\n",
+		"openclaw": "npm\topenclaw\t/c/o.tgz\t2026.10.9\t>=24.22.1 <25 || >=26.12.1\t-\n",
+		"gemini":   "npm\t@google/gemini-cli\t/c/g.tgz\t0.67.0\t>=20\t-\n",
 	}
 	var tools []Tool
-	for _, name := range []string{"codex", "claude", "opencode", "agent", "pi", "kimi", "qwen", "dsh"} {
+	writeExe(t, filepath.Join(bin, "node"), "#!/bin/sh\nprintf 'v22.23.4\\n'\n")
+	for _, name := range []string{"codex", "claude", "opencode", "agent", "pi", "kimi", "qwen", "dsh", "openclaw", "gemini"} {
 		writeExe(t, filepath.Join(bin, name), "#!/bin/sh\nprintf '1.0.0\\n'\n")
 		tools = append(tools, Tool{Name: name, Binary: name})
 		if body, ok := stamps[name]; ok {
@@ -765,6 +768,8 @@ func TestProbeReadsStagedStamps(t *testing.T) {
 		"kimi":     {true, "", ""},
 		"qwen":     {true, "", ""},
 		"dsh":      {false, "", ""},
+		"openclaw": {true, "2026.10.9", "needs Node >=24.22.1 <25 || >=26.12.1 (have v22.23.4)"},
+		"gemini":   {true, "0.67.0", ""},
 	}
 	for name, w := range want {
 		o := obs[name]
