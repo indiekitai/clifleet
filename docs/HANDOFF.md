@@ -52,7 +52,7 @@ Open PRs: none at handoff time.
 
 ## Install on Fan's control machine (Mac Studio)
 
-- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.7`, updated 2026-10-30 with `clifleet update`; SHA256SUMS and attestation verified). Moved to v0.2.8 on 2026-10-31 with `clifleet update` (SHA256SUMS and attestation verified).
+- Binary: `/Users/tf/go/bin/clifleet` (release build `v0.2.7`, updated 2026-10-30 with `clifleet update`; SHA256SUMS and attestation verified). Moved to v0.2.9 on 2026-10-31 with `clifleet update` (SHA256SUMS and attestation verified).
 - The 2026-10-29 13:31 apply report is kept as `~/.cache/clifleet/last-report-20261029-1331.json`; the 2026-10-30 apply report as `last-report-20261030-apply.json`; `last-report.json` now holds the latest status run.
 - Config: `~/.config/clifleet/hosts.toml` (timeout currently **`10m`**, concurrency `4`)
 - Cache / durable last run: `~/.cache/clifleet/last-report.json` plus `npm/`, `release/`, `staged/`
