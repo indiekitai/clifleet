@@ -150,6 +150,19 @@ Then the other three hosts (same day, Fan: "其他几台也都试试吧"): `--fe
 - claw1 openclaw: the apply step came back `failed (host claw1: exit status 255)`, an ssh-level drop; rerun with `-v` said `blocked (needs Node …)` as expected.
 - Status after (2026-10-31 22:30): mbp claude 2.1.314 / codex 0.165.0 / opencode 2.2.1 behind; omarchy dsh rc.2 (mise, host-managed: `mise upgrade` there); claw1 openclaw blocked by Node; mac-studio kimi / qwen one-shot only. Everything else current.
 
+## Agent's mbp rerun (2026-11-02, v0.2.9, Fan: "你去试吧")
+
+A fleet `upgrade --dry-run` first (13 s): only mbp had work, plus claw1 openclaw (still Node-blocked, not run) and mac-studio opencode (tap LATEST `—`, already 2.2.5). agent / cursor-agent LATEST resolved on the control machine this time (the 20 s `latestTimeout` held).
+
+`--fetch --hosts mbp --long` (22 min, default timeout), then `--apply --hosts mbp` (23 s):
+
+- Applied: codex 0.165.0 → **0.166.0**, opencode 2.2.1 → **2.2.5** (`brew upgrade also reported: Xcode is too old for Homebrew`; host warning).
+- The v0.2.9 brew budget fix held: opencode's `brew fetch` finished inside the cap (`brew update failed, used the existing tap`) instead of being cut by SSH.
+- claude failed `timed out` at fetch, reported by the script itself and without the `clifleet-script/1` marker; still 2.1.314 (mbp direct link, host problem).
+- agent / cursor-agent: staged 2026.10.22-27dcf5f, apply said `up to date`. Their links already point at `versions/2026.10.22-27dcf5f`; the version reads `keychain locked`, so fetch could not skip them and downloaded the archive again (backlog 9).
+
+Status after: mbp claude 2.1.314 is the only stageable tool behind on the fleet, besides claw1 openclaw (Node).
+
 ## Open gaps (product vs host)
 
 | Issue | Whose problem | Impact on Fan | Likely next step |
@@ -210,7 +223,9 @@ Left, none started (from the code review, `docs/reviews/2026-10-29-代码审查.
 
 8. Margin: a fetch/apply step cap is the host budget minus 20 s, but the prelude (brew shellenv ×2, nvm: up to ~15 s) and an apply's reprobe (`--version` up to 15 s per tool) also run inside that budget; a step that runs into its cap can still be cut by SSH first. Not seen yet; widen the margin or subtract the reprobe if it shows up.
 
-9. Smaller: `hostRun` struct for the shared parameters of `finishStage` / `finishSafe` / `runStageSteps` / `oneHost`; an AGENTS.md pointing Codex at CLAUDE.md.
+9. From the 2026-11-02 mbp rerun: when `--version` reads `keychain locked` (or is otherwise unreadable) but the live link points into the vendor's `versions/<ver>/` (Claude, Cursor Agent), the probe could take `<ver>` from the link target, so fetch skips a current tool instead of downloading 180 MB twice (agent + cursor-agent). Read-only, probe side; keep `version_raw` as is.
+
+10. Smaller: `hostRun` struct for the shared parameters of `finishStage` / `finishSafe` / `runStageSteps` / `oneHost`; an AGENTS.md pointing Codex at CLAUDE.md.
 
 ## Suggested first week for the next maintainer
 
